@@ -12,6 +12,7 @@ fixed, so rebuilding the same binaries yields the same digest.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses as dc
 import gzip
 import hashlib
@@ -22,7 +23,7 @@ import sys
 import tarfile
 import tempfile
 import zipfile
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -44,10 +45,53 @@ class PackagingError(RuntimeError):
     """Raised when packaging or verifying an archive fails."""
 
 
+# What a damaged, truncated or absent file raises on the way out of the
+# archive and filesystem libraries. None of these mean anything to a caller
+# on its own, so every read boundary turns them into a PackagingError that
+# names the file, which is the only error the command line handles.
+READ_ERRORS: Final = (OSError, EOFError, tarfile.TarError, zipfile.BadZipFile)
+
+
+@contextlib.contextmanager
+def _reading(path: Path, what: str) -> Iterator[None]:
+    """Report a failure to read ``path`` as a :class:`PackagingError`.
+
+    Parameters
+    ----------
+    path:
+        The file being read, named in the resulting message.
+    what:
+        What the read was for, so the message says which check gave up.
+
+    Yields
+    ------
+    None
+        The body runs with the read boundary in place.
+
+    Raises
+    ------
+    PackagingError
+        If the body raises a filesystem or archive-library error. A
+        ``PackagingError`` raised inside the body passes through unchanged.
+    """
+    try:
+        yield
+    except PackagingError:
+        raise
+    except READ_ERRORS as error:
+        raise PackagingError(f"{path.name}: could not read {what}: {error}") from error
+
+
 def sha256_file(path: Path) -> str:
-    """Return the hex SHA-256 digest of a file."""
+    """Return the hex SHA-256 digest of a file.
+
+    Raises
+    ------
+    PackagingError
+        If the file cannot be read.
+    """
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    with _reading(path, "the file to digest it"), path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(CHUNK), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -65,8 +109,16 @@ def write_sidecar(archive: Path) -> Path:
 
 
 def read_sidecar(sidecar: Path) -> tuple[str, str]:
-    """Return the (digest, file name) a sidecar records."""
-    text = sidecar.read_text(encoding="utf-8")
+    """Return the (digest, file name) a sidecar records.
+
+    Raises
+    ------
+    PackagingError
+        If the sidecar cannot be read, is not UTF-8, or is not a
+        ``sha256sum`` line.
+    """
+    with _reading(sidecar, "the sidecar"):
+        text = sidecar.read_text(encoding="utf-8")
     if not text.endswith("\n"):
         raise PackagingError(f"{sidecar.name}: sidecar must end with a newline")
     fields = text.rstrip("\n").split("  ")
@@ -168,7 +220,14 @@ def pack(config: Config, target: str, source_dir: Path, out_dir: Path) -> list[P
 
 
 def extract(archive: Path, fmt: str, destination: Path) -> None:
-    """Extract an archive, refusing any member that escapes ``destination``."""
+    """Extract an archive, refusing any member that escapes ``destination``.
+
+    Raises
+    ------
+    PackagingError
+        If a member escapes ``destination``, if a member is neither a file
+        nor a directory, or if the archive cannot be read.
+    """
     root = destination.resolve()
 
     def guard(name: str) -> Path:
@@ -178,7 +237,10 @@ def extract(archive: Path, fmt: str, destination: Path) -> None:
         return resolved
 
     if fmt == "tar.gz":
-        with tarfile.open(archive, "r:gz") as tar:
+        with (
+            _reading(archive, "the archive to extract it"),
+            tarfile.open(archive, "r:gz") as tar,
+        ):
             members = tar.getmembers()
             for member in members:
                 if not (member.isfile() or member.isdir()):
@@ -189,7 +251,7 @@ def extract(archive: Path, fmt: str, destination: Path) -> None:
             tar.extractall(destination, members=members, filter="data")
         return
 
-    with zipfile.ZipFile(archive) as zf:
+    with _reading(archive, "the archive to extract it"), zipfile.ZipFile(archive) as zf:
         for name in zf.namelist():
             guard(name)
         zf.extractall(destination)
@@ -198,12 +260,15 @@ def extract(archive: Path, fmt: str, destination: Path) -> None:
 def _archive_members(archive: Path) -> tuple[list[str], dict[str, int]]:
     """Return an archive's sorted member names and the modes of its files."""
     if archive.name.endswith(".tar.gz"):
-        with tarfile.open(archive, "r:gz") as tar:
+        with (
+            _reading(archive, "the archive members"),
+            tarfile.open(archive, "r:gz") as tar,
+        ):
             members = tar.getmembers()
         names = sorted(member.name.rstrip("/") for member in members)
         modes = {m.name.rstrip("/"): m.mode for m in members if m.isfile()}
         return names, modes
-    with zipfile.ZipFile(archive) as zf:
+    with _reading(archive, "the archive members"), zipfile.ZipFile(archive) as zf:
         infos = zf.infolist()
     names = sorted(info.filename.rstrip("/") for info in infos)
     # An entry that does not claim Unix origin has no mode a POSIX extractor
@@ -249,7 +314,14 @@ def smoke_command(binary: str, exe: Path) -> list[str]:
 
 
 def smoke_test(config: Config, binary: str, exe: Path) -> str:
-    """Run the packaged binary and return its combined output."""
+    """Run the packaged binary and return its combined output.
+
+    Raises
+    ------
+    PackagingError
+        If the binary does not start, does not finish within
+        ``SMOKE_TIMEOUT`` seconds, or does not report what it should.
+    """
     command = smoke_command(binary, exe)
     environment = dict(os.environ)
     # dylint-link resolves the linker through the active toolchain and exits
@@ -264,6 +336,10 @@ def smoke_test(config: Config, binary: str, exe: Path) -> str:
             env=environment,
             check=False,
         )
+    except subprocess.TimeoutExpired as error:
+        raise PackagingError(
+            f"{exe.name}: the packaged binary did not finish within {SMOKE_TIMEOUT}s"
+        ) from error
     except OSError as error:
         raise PackagingError(
             f"{exe.name}: the packaged binary did not start: {error}"

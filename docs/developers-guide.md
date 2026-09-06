@@ -43,6 +43,25 @@ about consecutive blank lines.
 | `scripts/verify_upstream.py` | Downloads upstream's archives and checks them the same way |
 | `tests/` | Unit tests, property tests and the workflow contracts |
 
+## Errors
+
+Both command lines handle exactly two exception types, `ConfigError` and
+`PackagingError`, and turn them into an `error: ...` line and exit status 1.
+Anything else reaches the runner as a traceback, which names a Python frame
+rather than the asset that failed.
+
+Every boundary that reads something therefore converts what the library
+raises. `_reading` in `scripts/package.py` wraps the filesystem and archive
+calls, so a truncated tarball, an unreadable sidecar or a file that is not a
+zip is reported as `<name>: could not read ...`. `smoke_test` converts both
+a binary that will not start and one that does not finish inside
+`SMOKE_TIMEOUT`. `download` converts a destination it cannot write, which
+the retry loop must not treat as a transient network failure.
+
+A new function that opens a file, reads an archive or spawns a process needs
+the same treatment and a test that proves it, or the release fails with a
+traceback instead of a diagnosis.
+
 ## Commit gates
 
 ```console

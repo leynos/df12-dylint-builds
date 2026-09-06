@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
@@ -18,6 +19,7 @@ from dylint_config import Config, exe_suffix
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from package import (
+    SMOKE_TIMEOUT,
     UNIX_CREATE_SYSTEM,
     PackagingError,
     check_layout,
@@ -29,6 +31,7 @@ from package import (
     parse_archive_name,
     read_sidecar,
     smoke_command,
+    smoke_test,
     verify,
     verify_dist,
     write_sidecar,
@@ -327,12 +330,101 @@ def test_a_missing_asset_fails_the_audit(
 
 
 def test_an_unexpected_asset_fails_the_audit(
+    fixture_config: Config, complete_dist: Path
+) -> None:
+    """A stray asset fails a whole-release audit that is otherwise complete.
+
+    The directory holds every configured leg, so nothing is missing and the
+    only thing the audit can object to is the stray file. Without that, a
+    partial directory would fail for its missing assets whether the
+    unexpected-asset check existed or not.
+    """
+    (complete_dist / "stray.tar.gz").write_bytes(b"")
+    with pytest.raises(PackagingError) as caught:
+        verify_dist(fixture_config, complete_dist, target=None, run_smoke=False)
+    message = str(caught.value)
+    assert "missing=[]" in message, (
+        "the directory was complete, so the audit must object only to the stray"
+    )
+    assert "unexpected=['stray.tar.gz']" in message, (
+        "the audit must name the asset the configuration never makes"
+    )
+
+
+def test_a_complete_release_passes_the_whole_release_audit(
+    fixture_config: Config, complete_dist: Path
+) -> None:
+    """Every configured leg together is exactly what the release must publish."""
+    digests = verify_dist(fixture_config, complete_dist, target=None, run_smoke=False)
+    assert len(digests) == len(fixture_config.released_archive_names()), (
+        "the audit must verify every archive the configuration publishes"
+    )
+
+
+def test_inspecting_an_archive_refuses_a_tampered_sidecar(
     fixture_config: Config, packed_dist: Path
 ) -> None:
-    """A whole-release audit refuses an asset the configuration never makes."""
-    (packed_dist / "stray.tar.gz").write_bytes(b"")
-    with pytest.raises(PackagingError, match="unexpected="):
-        verify_dist(fixture_config, packed_dist, target=None, run_smoke=False)
+    """The inspection layer cannot be used to bypass the sidecar check."""
+    archive = packed_dist / fixture_config.archive_name(
+        "cargo-dylint", POSIX_TARGET, "tar.gz"
+    )
+    sidecar = archive.with_name(archive.name + ".sha256")
+    sidecar.write_text(f"{'0' * 64}  {archive.name}\n", encoding="utf-8")
+    with pytest.raises(PackagingError, match="does not match sidecar"):
+        inspect_archive(fixture_config, archive)
+
+
+def test_inspecting_an_archive_refuses_a_wrong_layout(
+    fixture_config: Config, tmp_path: Path
+) -> None:
+    """The inspection layer cannot be used to bypass the layout check."""
+    archive = tmp_path / fixture_config.archive_name(
+        "cargo-dylint", POSIX_TARGET, "tar.gz"
+    )
+    stem = fixture_config.stem("cargo-dylint", POSIX_TARGET)
+    payload = tmp_path / "cargo-dylint"
+    payload.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(payload, arcname=f"{stem}/cargo-dylint")
+        tar.add(payload, arcname=f"{stem}/README")
+    write_sidecar(archive)
+    with pytest.raises(PackagingError, match="layout is"):
+        inspect_archive(fixture_config, archive)
+
+
+def test_a_damaged_archive_is_reported_rather_than_raised_raw(
+    fixture_config: Config, packed_dist: Path
+) -> None:
+    """A file that is not an archive fails the audit instead of the process.
+
+    Only ``ConfigError`` and ``PackagingError`` reach the command line's
+    handler, so a bare ``tarfile`` or ``zipfile`` error would surface as a
+    traceback rather than as a message naming the asset.
+    """
+    archive = packed_dist / fixture_config.archive_name(
+        "cargo-dylint", POSIX_TARGET, "tar.gz"
+    )
+    archive.write_bytes(b"this is not a gzip stream")
+    write_sidecar(archive)
+    with pytest.raises(PackagingError, match="could not read"):
+        inspect_archive(fixture_config, archive)
+
+
+def test_a_binary_that_never_finishes_fails_the_smoke_test(
+    fixture_config: Config, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A hung binary is a packaging failure, not an unhandled timeout.
+
+    ``subprocess.TimeoutExpired`` is not an ``OSError``, so before it was
+    caught it escaped every handler the command line has.
+    """
+
+    def _hang(*args: object, **kwargs: object) -> object:
+        raise subprocess.TimeoutExpired(cmd="cargo-dylint", timeout=SMOKE_TIMEOUT)
+
+    monkeypatch.setattr(subprocess, "run", _hang)
+    with pytest.raises(PackagingError, match="did not finish within"):
+        smoke_test(fixture_config, "cargo-dylint", tmp_path / "cargo-dylint")
 
 
 @pytest.mark.parametrize("fmt", ["tar.gz", "zip"])

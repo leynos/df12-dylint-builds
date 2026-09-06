@@ -59,8 +59,9 @@ def download(
     Raises
     ------
     PackagingError
-        If the server returns a status that will not change on a retry, or if
-        every attempt fails.
+        If the server returns a status that will not change on a retry, if
+        every attempt fails, or if the body arrives but ``destination``
+        cannot be written.
     """
     last: Exception | None = None
     for attempt in range(1, attempts + 1):
@@ -79,7 +80,14 @@ def download(
             # response is retried rather than written out as an archive.
             last = error
         else:
-            destination.write_bytes(payload)
+            try:
+                destination.write_bytes(payload)
+            except OSError as error:
+                # The body arrived; the failure is local, and no number of
+                # retries will make the destination writable.
+                raise PackagingError(
+                    f"could not write {destination}: {error}"
+                ) from error
             return destination
         if attempt == attempts:
             break

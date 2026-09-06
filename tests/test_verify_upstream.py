@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import http.server
+import tarfile
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -11,7 +12,7 @@ from pathlib import Path
 import pytest
 from conftest import FIXTURE_COMMIT, FIXTURE_CONFIG, write_stubs
 from dylint_config import parse_config
-from package import PackagingError, pack
+from package import PackagingError, pack, write_sidecar
 from verify_upstream import download, verify_upstream
 
 UPSTREAM_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")
@@ -126,6 +127,46 @@ def test_a_corrupt_upstream_archive_fails_the_check(
     config = parse_config(_serving_config(base_url))
     with pytest.raises(PackagingError, match="does not match sidecar"):
         verify_upstream(config, tmp_path / "work")
+
+
+def test_an_upstream_archive_with_a_stray_member_fails_the_layout_check(
+    upstream_server: tuple[str, Path], tmp_path: Path
+) -> None:
+    """Upstream's archives are held to this repository's layout, not just its digests.
+
+    The archive is repacked with an extra member and its sidecar rewritten to
+    match, so the download and the checksum both succeed and only the layout
+    check can object. Deleting the ``check_layout`` call in ``verify_upstream``
+    makes this test fail; without it the suite passes with that call removed.
+    """
+    base_url, root = upstream_server
+    _publish_upstream_fixture(root, tmp_path)
+    archive = root / f"cargo-dylint-{UPSTREAM_TARGETS[0]}-v6.0.4.tar.gz"
+    stem = f"cargo-dylint-{UPSTREAM_TARGETS[0]}-v6.0.4"
+    payload = tmp_path / "payload"
+    payload.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(payload, arcname=f"{stem}/cargo-dylint")
+        tar.add(payload, arcname=f"{stem}/LICENSE")
+    write_sidecar(archive)
+    config = parse_config(_serving_config(base_url))
+    with pytest.raises(PackagingError, match="layout is"):
+        verify_upstream(config, tmp_path / "work")
+
+
+def test_a_download_that_cannot_be_written_names_the_destination(
+    upstream_server: tuple[str, Path], tmp_path: Path
+) -> None:
+    """A local write failure is a packaging error, not an unhandled OSError.
+
+    The body arrives, so the retry loop has nothing to retry; only the write
+    can fail, and the command line handles no other exception type.
+    """
+    base_url, root = upstream_server
+    (root / "probe.txt").write_bytes(b"probe")
+    destination = tmp_path / "absent-directory" / "probe.txt"
+    with pytest.raises(PackagingError, match="could not write"):
+        download(f"{base_url}/v6.0.4/probe.txt", destination, backoff=0)
 
 
 def test_a_download_is_retried_before_it_fails(

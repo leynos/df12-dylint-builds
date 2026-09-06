@@ -104,6 +104,24 @@ def packed_dist(tmp_path: Path, fixture_config: Config, stub_source: Path) -> Pa
     return dist
 
 
+@pytest.fixture
+def complete_dist(tmp_path: Path, fixture_config: Config, stub_source: Path) -> Path:
+    """Return a dist directory holding every asset the release publishes.
+
+    A whole-release audit compares the directory against the complete
+    expected set, so a test of that audit needs a directory that is complete
+    to begin with; otherwise every such test also reports missing assets and
+    cannot tell one failure from another.
+    """
+    from package import pack
+
+    dist = tmp_path / "complete-dist"
+    pack(fixture_config, POSIX_TARGET, stub_source, dist)
+    windows_source = write_stubs(tmp_path / "release-windows", exe_suffix=".exe")
+    pack(fixture_config, WINDOWS_TARGET, windows_source, dist)
+    return dist
+
+
 @pytest.fixture(autouse=True)
 def _quiet_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a developer's ambient toolchain out of the stub smoke tests."""
