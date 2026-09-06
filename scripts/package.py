@@ -53,33 +53,36 @@ READ_ERRORS: Final = (OSError, EOFError, tarfile.TarError, zipfile.BadZipFile)
 
 
 @contextlib.contextmanager
-def _reading(path: Path, what: str) -> Iterator[None]:
-    """Report a failure to read ``path`` as a :class:`PackagingError`.
+def _reading(path: Path, attempt: str) -> Iterator[None]:
+    """Report a filesystem or archive failure over ``path`` as a domain error.
 
     Parameters
     ----------
     path:
-        The file being read, named in the resulting message.
-    what:
-        What the read was for, so the message says which check gave up.
+        The file being worked on, named at the front of the message.
+    attempt:
+        What was being attempted, phrased as the failure: ``"could not read
+        the sidecar"``. It becomes the middle of the message, so it says
+        which step gave up rather than which library did.
 
     Yields
     ------
     None
-        The body runs with the read boundary in place.
+        The body runs with the boundary in place.
 
     Raises
     ------
     PackagingError
         If the body raises a filesystem or archive-library error. A
-        ``PackagingError`` raised inside the body passes through unchanged.
+        ``PackagingError`` raised inside the body passes through unchanged,
+        so a check that has already diagnosed itself keeps its own message.
     """
     try:
         yield
     except PackagingError:
         raise
     except READ_ERRORS as error:
-        raise PackagingError(f"{path.name}: could not read {what}: {error}") from error
+        raise PackagingError(f"{path.name}: {attempt}: {error}") from error
 
 
 def sha256_file(path: Path) -> str:
@@ -91,7 +94,10 @@ def sha256_file(path: Path) -> str:
         If the file cannot be read.
     """
     digest = hashlib.sha256()
-    with _reading(path, "the file to digest it"), path.open("rb") as handle:
+    with (
+        _reading(path, "could not read the file to digest it"),
+        path.open("rb") as handle,
+    ):
         for chunk in iter(lambda: handle.read(CHUNK), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -117,7 +123,7 @@ def read_sidecar(sidecar: Path) -> tuple[str, str]:
         If the sidecar cannot be read, is not UTF-8, or is not a
         ``sha256sum`` line.
     """
-    with _reading(sidecar, "the sidecar"):
+    with _reading(sidecar, "could not read the sidecar"):
         text = sidecar.read_text(encoding="utf-8")
     if not text.endswith("\n"):
         raise PackagingError(f"{sidecar.name}: sidecar must end with a newline")
@@ -238,7 +244,7 @@ def extract(archive: Path, fmt: str, destination: Path) -> None:
 
     if fmt == "tar.gz":
         with (
-            _reading(archive, "the archive to extract it"),
+            _reading(archive, "could not extract the archive"),
             tarfile.open(archive, "r:gz") as tar,
         ):
             members = tar.getmembers()
@@ -251,7 +257,10 @@ def extract(archive: Path, fmt: str, destination: Path) -> None:
             tar.extractall(destination, members=members, filter="data")
         return
 
-    with _reading(archive, "the archive to extract it"), zipfile.ZipFile(archive) as zf:
+    with (
+        _reading(archive, "could not extract the archive"),
+        zipfile.ZipFile(archive) as zf,
+    ):
         for name in zf.namelist():
             guard(name)
         zf.extractall(destination)
@@ -261,14 +270,17 @@ def _archive_members(archive: Path) -> tuple[list[str], dict[str, int]]:
     """Return an archive's sorted member names and the modes of its files."""
     if archive.name.endswith(".tar.gz"):
         with (
-            _reading(archive, "the archive members"),
+            _reading(archive, "could not read the archive members"),
             tarfile.open(archive, "r:gz") as tar,
         ):
             members = tar.getmembers()
         names = sorted(member.name.rstrip("/") for member in members)
         modes = {m.name.rstrip("/"): m.mode for m in members if m.isfile()}
         return names, modes
-    with _reading(archive, "the archive members"), zipfile.ZipFile(archive) as zf:
+    with (
+        _reading(archive, "could not read the archive members"),
+        zipfile.ZipFile(archive) as zf,
+    ):
         infos = zf.infolist()
     names = sorted(info.filename.rstrip("/") for info in infos)
     # An entry that does not claim Unix origin has no mode a POSIX extractor
