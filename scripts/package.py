@@ -12,6 +12,7 @@ fixed, so rebuilding the same binaries yields the same digest.
 from __future__ import annotations
 
 import argparse
+import dataclasses as dc
 import gzip
 import hashlib
 import os
@@ -280,8 +281,40 @@ def smoke_test(config: Config, binary: str, exe: Path) -> str:
     return output
 
 
-def verify(config: Config, archive: Path, *, run_smoke: bool = True) -> str:
-    """Verify one archive: sidecar, layout and, by default, the binary itself."""
+@dc.dataclass(frozen=True, slots=True)
+class ArchiveReport:
+    """What reading an archive establishes, without running anything in it."""
+
+    binary: str
+    target: str
+    fmt: str
+    digest: str
+
+
+def inspect_archive(config: Config, archive: Path) -> ArchiveReport:
+    """Check everything about an archive that can be checked by reading it.
+
+    This is the whole of the contract that does not require the archive's
+    platform: the name resolves to a leg this configuration produces, the
+    sidecar matches, and the layout holds one directory and one executable.
+
+    Parameters
+    ----------
+    config:
+        The configuration the archive is expected to conform to.
+    archive:
+        The archive to read. Its sidecar must sit beside it.
+
+    Returns
+    -------
+    ArchiveReport
+        What the archive was found to be.
+
+    Raises
+    ------
+    PackagingError
+        If the name, the sidecar or the layout does not hold.
+    """
     binary, target, fmt = parse_archive_name(config, archive.name)
     digest = check_sidecar(archive)
     check_layout(
@@ -289,21 +322,62 @@ def verify(config: Config, archive: Path, *, run_smoke: bool = True) -> str:
         config.stem(binary, target),
         f"{binary}{config.target(target).exe_suffix}",
     )
+    return ArchiveReport(binary=binary, target=target, fmt=fmt, digest=digest)
+
+
+def run_packaged_binary(config: Config, archive: Path, report: ArchiveReport) -> str:
+    """Extract an archive to a temporary directory and run the binary inside it.
+
+    This is the half of verification that touches the filesystem and spawns a
+    process, and it only means anything on a runner of the archive's own
+    architecture.
+
+    Parameters
+    ----------
+    config:
+        The configuration the archive conforms to.
+    archive:
+        The archive to extract.
+    report:
+        What :func:`inspect_archive` found, which names the binary and target.
+
+    Returns
+    -------
+    str
+        The binary's combined output.
+
+    Raises
+    ------
+    PackagingError
+        If a member escapes the extraction directory, or the binary does not
+        start or does not report what it should.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        destination = Path(raw)
+        extract(archive, report.fmt, destination)
+        exe = (
+            destination
+            / config.stem(report.binary, report.target)
+            / f"{report.binary}{config.target(report.target).exe_suffix}"
+        )
+        # The recorded mode has already been checked by check_layout.
+        # Python's extractors discard it, so the bit is restored here to
+        # run the binary rather than to assert anything about it.
+        exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+        return smoke_test(config, report.binary, exe)
+
+
+def verify(config: Config, archive: Path, *, run_smoke: bool = True) -> str:
+    """Verify one archive and return its digest.
+
+    Reading the archive is always done; running the binary inside it is done
+    unless ``run_smoke`` is false, which is how the Linux audit re-checks
+    assets it cannot execute.
+    """
+    report = inspect_archive(config, archive)
     if run_smoke:
-        with tempfile.TemporaryDirectory() as raw:
-            destination = Path(raw)
-            extract(archive, fmt, destination)
-            exe = (
-                destination
-                / config.stem(binary, target)
-                / f"{binary}{config.target(target).exe_suffix}"
-            )
-            # The recorded mode has already been checked by check_layout.
-            # Python's extractors discard it, so the bit is restored here to
-            # run the binary rather than to assert anything about it.
-            exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
-            smoke_test(config, binary, exe)
-    return digest
+        run_packaged_binary(config, archive, report)
+    return report.digest
 
 
 def _resolve_config(path: str | None) -> Config:

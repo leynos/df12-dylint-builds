@@ -24,6 +24,7 @@ from package import (
     check_sidecar,
     expected_assets,
     extract,
+    inspect_archive,
     pack,
     parse_archive_name,
     read_sidecar,
@@ -334,6 +335,7 @@ def test_an_unexpected_asset_fails_the_audit(
         verify_dist(fixture_config, packed_dist, target=None, run_smoke=False)
 
 
+@pytest.mark.parametrize("fmt", ["tar.gz", "zip"])
 @settings(max_examples=50, deadline=None)
 @given(
     escape=st.sampled_from(["..", "../..", "/etc"]),
@@ -344,18 +346,66 @@ def test_an_unexpected_asset_fails_the_audit(
     ),
 )
 def test_an_archive_member_cannot_escape_the_extraction_directory(
-    tmp_path_factory: pytest.TempPathFactory, escape: str, leaf: str
+    tmp_path_factory: pytest.TempPathFactory, fmt: str, escape: str, leaf: str
 ) -> None:
     """Extraction refuses a member whose path resolves outside the destination.
 
     Nobody writes these paths down, so they are generated: a hostile archive
-    is the one input a consumer cannot inspect before extracting.
+    is the one input a consumer cannot inspect before extracting. Both
+    formats are covered, because the consumer chooses the extractor and the
+    zip path is the one a Windows consumer takes.
     """
     directory = tmp_path_factory.mktemp("escape")
-    archive = directory / "hostile.tar.gz"
-    with tarfile.open(archive, "w:gz") as tar:
-        info = tarfile.TarInfo(f"{escape}/{leaf}")
-        info.size = 0
-        tar.addfile(info)
+    member = f"{escape}/{leaf}"
+    archive = directory / f"hostile.{fmt}"
+    if fmt == "tar.gz":
+        with tarfile.open(archive, "w:gz") as tar:
+            info = tarfile.TarInfo(member)
+            info.size = 0
+            tar.addfile(info)
+    else:
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr(member, b"")
     with pytest.raises(PackagingError, match="escapes the archive"):
-        extract(archive, "tar.gz", directory / "out")
+        extract(archive, fmt, directory / "out")
+
+
+@requires_posix_exec
+def test_a_packed_windows_release_verifies_end_to_end(
+    fixture_config: Config, tmp_path: Path
+) -> None:
+    """Both Windows formats verify with the binary actually run from each.
+
+    The Windows leg is the one that packs a zip, carries an ``.exe`` suffix
+    and takes the zip extraction path, so it is exercised whole rather than
+    inspected piecemeal.
+    """
+    source = write_stubs(tmp_path / "release", exe_suffix=".exe")
+    dist = tmp_path / "dist"
+    packed = pack(fixture_config, WINDOWS_TARGET, source, dist)
+    digests = verify_dist(fixture_config, dist, target=WINDOWS_TARGET, run_smoke=True)
+    assert sorted(archive.name for archive in packed) == sorted(
+        name
+        for name in expected_assets(fixture_config, WINDOWS_TARGET)
+        if not name.endswith(".sha256")
+    ), "the Windows leg must publish a tar.gz and a zip for each binary"
+    assert len(digests) == len(packed), (
+        "every archive the Windows leg packs must verify, zip included"
+    )
+
+
+@requires_posix_exec
+def test_inspecting_an_archive_reports_what_it_is(
+    fixture_config: Config, packed_dist: Path
+) -> None:
+    """Reading an archive establishes its leg and digest without running it."""
+    archive = packed_dist / "cargo-dylint-x86_64-apple-darwin-v6.0.4.tar.gz"
+    report = inspect_archive(fixture_config, archive)
+    assert (report.binary, report.target, report.fmt) == (
+        "cargo-dylint",
+        POSIX_TARGET,
+        "tar.gz",
+    ), "the report must name the leg the archive belongs to"
+    assert report.digest == check_sidecar(archive), (
+        "the reported digest must be the one the sidecar records"
+    )

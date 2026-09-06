@@ -1,5 +1,36 @@
 # Developers' guide
 
+## Prerequisites
+
+| Tool | Version | Why |
+| --- | --- | --- |
+| Python | 3.12 or newer | `scripts/` targets 3.12; the gates run on 3.13 |
+| `uv` | any recent release | runs the tests and Ruff in throwaway environments |
+| `make` | any | the gates are Makefile targets |
+| `markdownlint-cli2` | 0.20 or newer | the Markdown gate |
+| Ruff | 0.15.12 | pinned in the Makefile as `RUFF_VERSION` |
+
+No Rust toolchain is needed to develop here. Dylint is built on the release
+runners, never locally.
+
+Install `uv` and `markdownlint-cli2` however your system prefers, then:
+
+```console
+make all
+```
+
+`uv` fetches pytest, PyYAML and Hypothesis on demand from the versions
+pinned in the Makefile's `PYTEST_DEPS`; `pyproject.toml` lists the same
+bounds under `dependency-groups.dev` for an editor that wants a resolved
+environment. Ruff is run through `uv tool run` at the pinned version, so a
+different Ruff on your PATH does not change the verdict. Override either
+tool for a one-off run with `make MDLINT=... markdownlint` or
+`make RUFF_VERSION=... ruff`.
+
+The Markdown gate is the one place where a green local run is not proof:
+CI runs a newer markdownlint than most hosts have, and the two disagree
+about consecutive blank lines.
+
 ## Layout
 
 | Path | Purpose |
