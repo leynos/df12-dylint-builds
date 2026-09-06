@@ -147,8 +147,10 @@ def test_the_windows_zip_records_an_executable_mode(
     with zipfile.ZipFile(dist / f"{stem}.zip") as archive:
         infos = archive.infolist()
         info = archive.getinfo(f"{stem}/dylint-link.exe")
-    assert [entry.create_system for entry in infos] == [UNIX_CREATE_SYSTEM] * len(infos)
-    assert (info.external_attr >> 16) & 0o111
+    assert [entry.create_system for entry in infos] == [UNIX_CREATE_SYSTEM] * len(
+        infos
+    ), "every zip entry must claim Unix origin or its mode is discarded"
+    assert (info.external_attr >> 16) & 0o111, "the packaged binary is not executable"
 
 
 def test_a_zip_entry_of_msdos_origin_fails_the_layout_check(

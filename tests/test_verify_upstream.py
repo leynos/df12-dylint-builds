@@ -110,7 +110,9 @@ def test_upstreams_archives_pass_our_own_checks(
     _publish_upstream_fixture(root, tmp_path)
     config = parse_config(_serving_config(base_url))
     digests = verify_upstream(config, tmp_path / "work")
-    assert len(digests) == len(config.binaries) * len(config.upstream.targets)
+    assert len(digests) == len(config.binaries) * len(config.upstream.targets), (
+        "every upstream binary must be checked for every upstream target"
+    )
 
 
 def test_a_corrupt_upstream_archive_fails_the_check(
@@ -168,7 +170,9 @@ def test_a_permanent_status_is_not_retried(
     base_url, _ = upstream_server
     with pytest.raises(PackagingError, match="HTTP 404"):
         download(f"{base_url}/v6.0.4/absent.tar.gz", tmp_path / "out", backoff=0)
-    assert "retrying" not in capsys.readouterr().out
+    assert "retrying" not in capsys.readouterr().out, (
+        "a status that will not change must fail without a retry"
+    )
 
 
 def test_a_truncated_response_is_retried_and_never_written(
@@ -178,4 +182,4 @@ def test_a_truncated_response_is_retried_and_never_written(
     destination = tmp_path / "out"
     with pytest.raises(PackagingError, match="after 2 attempts"):
         download(f"{truncating_server}/anything", destination, attempts=2, backoff=0)
-    assert not destination.exists()
+    assert not destination.exists(), "a truncated body must not be written out"

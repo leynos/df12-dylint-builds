@@ -55,7 +55,7 @@ Unix-created so that the mode is not discarded.
 Whether the extracted file is executable depends on the extractor. GNU
 `tar`, `bsdtar` and `unzip` apply the recorded mode. Python's
 `zipfile.extractall` and `shutil.unpack_archive` do not: they ignore the
-mode entirely and leave the file unreadable to `exec`. If extraction goes
+mode entirely and leave the file non-executable. If extraction goes
 through one of those, `chmod +x` the binary afterwards.
 
 ## Checksums

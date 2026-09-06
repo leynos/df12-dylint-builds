@@ -41,7 +41,10 @@ def test_the_repository_configuration_parses(repo_config: Config) -> None:
     of a routine upstream move, and a test that pinned it would only ever
     report that the move happened.
     """
-    assert repo_config.tag == f"v{repo_config.version}"
+    assert repo_config.tag == f"v{repo_config.version}", (
+        f"tag {repo_config.tag!r} does not name version "
+        f"{repo_config.version!r}; every archive name carries the version"
+    )
     assert repo_config.binaries == ("cargo-dylint", "dylint-link")
 
 
@@ -103,7 +106,7 @@ def test_the_upstream_names_match_the_published_assets(fixture_config: Config) -
         "dylint-link-x86_64-unknown-linux-gnu-v6.0.4.tar.gz",
         "cargo-dylint-aarch64-unknown-linux-gnu-v6.0.4.tar.gz",
         "dylint-link-aarch64-unknown-linux-gnu-v6.0.4.tar.gz",
-    }
+    }, "the names downloaded from upstream must be the assets upstream published"
 
 
 def test_the_upstream_url_uses_the_pinned_tag(fixture_config: Config) -> None:
