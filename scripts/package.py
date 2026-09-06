@@ -283,7 +283,19 @@ def smoke_test(config: Config, binary: str, exe: Path) -> str:
 
 @dc.dataclass(frozen=True, slots=True)
 class ArchiveReport:
-    """What reading an archive establishes, without running anything in it."""
+    """What reading an archive establishes, without running anything in it.
+
+    Attributes
+    ----------
+    binary:
+        The binary the archive carries, ``cargo-dylint`` or ``dylint-link``.
+    target:
+        The target triple the binary was built for.
+    fmt:
+        The archive format, ``tar.gz`` or ``zip``.
+    digest:
+        The archive's SHA-256 digest, which matched its sidecar.
+    """
 
     binary: str
     target: str

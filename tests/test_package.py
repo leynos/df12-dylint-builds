@@ -394,12 +394,16 @@ def test_a_packed_windows_release_verifies_end_to_end(
     )
 
 
-@requires_posix_exec
 def test_inspecting_an_archive_reports_what_it_is(
     fixture_config: Config, packed_dist: Path
 ) -> None:
-    """Reading an archive establishes its leg and digest without running it."""
-    archive = packed_dist / "cargo-dylint-x86_64-apple-darwin-v6.0.4.tar.gz"
+    """Reading an archive establishes its leg and digest without running it.
+
+    Nothing here executes, so this holds on every host.
+    """
+    archive = packed_dist / fixture_config.archive_name(
+        "cargo-dylint", POSIX_TARGET, "tar.gz"
+    )
     report = inspect_archive(fixture_config, archive)
     assert (report.binary, report.target, report.fmt) == (
         "cargo-dylint",

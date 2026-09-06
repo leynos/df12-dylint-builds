@@ -13,7 +13,8 @@
 No Rust toolchain is needed to develop here. Dylint is built on the release
 runners, never locally.
 
-Install `uv` and `markdownlint-cli2` however your system prefers, then:
+Install `uv` and `markdownlint-cli2` by whatever means the system
+prefers, then:
 
 ```console
 make all
@@ -23,8 +24,8 @@ make all
 pinned in the Makefile's `PYTEST_DEPS`; `pyproject.toml` lists the same
 bounds under `dependency-groups.dev` for an editor that wants a resolved
 environment. Ruff is run through `uv tool run` at the pinned version, so a
-different Ruff on your PATH does not change the verdict. Override either
-tool for a one-off run with `make MDLINT=... markdownlint` or
+different Ruff on the PATH does not change the verdict. Either tool can be
+overridden for a one-off run with `make MDLINT=... markdownlint` or
 `make RUFF_VERSION=... ruff`.
 
 The Markdown gate is the one place where a green local run is not proof:
@@ -80,8 +81,8 @@ story.
 2. Resolve the tag to a commit:
    `gh api repos/trailofbits/dylint/git/ref/tags/vX.Y.Z --jq .object.sha`.
 3. Update `version`, `tag` and `commit` in `dylint.toml`.
-4. Check whether upstream has started building either of our targets. If it
-   has, remove it here; the configuration will refuse the overlap anyway.
+4. Check whether upstream has started building either target published
+   here. If it has, remove it; the configuration refuses the overlap anyway.
 5. `make all`, commit, merge, then push `vX.Y.Z+build.1`.
 
 ## The workflow contracts
@@ -92,13 +93,13 @@ runner label, the job dependencies. An assertion that merely finds an
 identifier would be satisfied by the comment above a deleted line.
 
 Every contract's doc comment records a mutation that was applied once and
-made it fail. When you add a contract, do the same: change the line it
+made it fail. A new contract earns the same treatment: change the line it
 protects, watch the test fail, restore, and write the mutation down.
 
-If you mutate a source file and revert it, clear `scripts/__pycache__` and
-`tests/__pycache__` first. Python validates cached bytecode on the source's
-size and modification time to the second, so an edit of the same length that
-is reverted within a second is not noticed.
+Mutating a source file and reverting it calls for clearing
+`scripts/__pycache__` and `tests/__pycache__` first. Python validates cached
+bytecode on the source's size and modification time to the second, so an
+edit of the same length that is reverted within a second is not noticed.
 
 ## Running things by hand
 
