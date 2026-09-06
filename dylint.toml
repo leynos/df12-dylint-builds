@@ -1,0 +1,36 @@
+# Single source of truth for what this repository builds and publishes.
+#
+# The release workflow derives its matrix from this file and the contract
+# tests read it, so no version, target, runner or archive name is written
+# down anywhere else. See docs/adr-001-prebuilt-dylint-archives.md.
+
+schema_version = 1
+
+[dylint]
+# The upstream release this repository mirrors. `commit` is the object the
+# tag resolved to when it was pinned; the build checks out the commit, not
+# the tag, so a moved tag cannot change what is built.
+version = "6.0.4"
+repository = "https://github.com/trailofbits/dylint"
+tag = "v6.0.4"
+commit = "09bf11417d8cfc4d0c2ef9053898c6a9f378f794"
+# Upstream's own release build enables this feature so the published
+# cargo-dylint fetches its driver from crates.io rather than building one.
+features = "dylint/__driver_from_crates_io"
+binaries = ["cargo-dylint", "dylint-link"]
+
+# Targets this repository builds because upstream does not publish them.
+[targets."x86_64-apple-darwin"]
+runner = "macos-15-intel"
+formats = ["tar.gz"]
+
+[targets."x86_64-pc-windows-msvc"]
+runner = "windows-latest"
+formats = ["tar.gz", "zip"]
+
+# Targets upstream does publish. The release verifies their sidecars to
+# prove ours carry the format consumers already rely on.
+[upstream]
+runner = "ubuntu-24.04"
+releases_url = "https://github.com/trailofbits/dylint/releases/download"
+targets = ["x86_64-unknown-linux-gnu"]

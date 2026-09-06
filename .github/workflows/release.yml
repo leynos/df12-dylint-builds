@@ -1,0 +1,214 @@
+name: Release
+
+'on':
+  push:
+    tags:
+      - 'v*'
+
+# One run per tag at a time. A second run for the same ref would upload over
+# assets the first has already audited, so it waits instead.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Resolve release tag and build matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      version: ${{ steps.facts.outputs.version }}
+      repository: ${{ steps.facts.outputs.repository }}
+      commit: ${{ steps.facts.outputs.commit }}
+      features: ${{ steps.facts.outputs.features }}
+      upstream_runner: ${{ steps.facts.outputs.upstream_runner }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.13'
+      - name: Resolve tag
+        id: resolve
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="$(python scripts/matrix.py check-tag "$REF_NAME")"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Derive build matrix from dylint.toml
+        id: matrix
+        run: |
+          set -euo pipefail
+          matrix="$(python scripts/matrix.py matrix)"
+          echo "$matrix" | python -m json.tool >/dev/null
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+      - name: Publish the pinned upstream facts
+        id: facts
+        run: python scripts/matrix.py facts >> "$GITHUB_OUTPUT"
+
+  create-release:
+    name: Create draft release
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Create draft release when missing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # A published release is immutable: consumers pin the digests in its
+          # sidecars, so re-uploading would change an asset under them. Only a
+          # draft left by an earlier failed run of this tag may be resumed.
+          if is_draft="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [ "$is_draft" != "true" ]; then
+              echo "release $TAG is already published; releases are immutable" >&2
+              exit 1
+            fi
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --draft \
+            --generate-notes \
+            --title "$TAG" \
+            --verify-tag
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [prepare, create-release]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Check out dylint at the pinned commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          repository: trailofbits/dylint
+          ref: ${{ needs.prepare.outputs.commit }}
+          path: dylint
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.13'
+      - name: Record the toolchain this leg builds with
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc --version --verbose
+          cargo --version
+      - name: Build cargo-dylint and dylint-link
+        working-directory: dylint
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          FEATURES: ${{ needs.prepare.outputs.features }}
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --target "$TARGET" \
+            -p cargo-dylint -p dylint-link --features="$FEATURES"
+      - name: Package the archives and their sidecars
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: >-
+          python scripts/package.py pack --target "$TARGET"
+          --source-dir "dylint/target/$TARGET/release" --out-dir dist
+      - name: Verify every archive by extracting it and running the binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python scripts/package.py verify --dist dist --target "$TARGET"
+      - name: Upload this leg's archives and sidecars
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release upload "$TAG" dist/* --clobber
+
+  verify-upstream:
+    name: Verify upstream's published sidecars
+    needs: prepare
+    runs-on: ${{ needs.prepare.outputs.upstream_runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.13'
+      # This job builds nothing. It downloads upstream's own archives and
+      # applies the sidecar and layout checks this repository's assets must
+      # pass, so a divergence in either format fails the release.
+      - name: Download and check upstream's archives
+        run: python scripts/verify_upstream.py --work-dir upstream-dist
+
+  audit:
+    name: Audit the draft assets
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.13'
+      - name: Download every draft asset afresh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p audit-dist
+          for attempt in 1 2 3; do
+            if gh release download "$TAG" --dir audit-dist --clobber; then
+              exit 0
+            fi
+            echo "download attempt $attempt failed; retrying" >&2
+            sleep $((attempt * 10))
+          done
+          echo "could not download the draft assets for $TAG" >&2
+          exit 1
+      # The audit runs on Linux and cannot execute a macOS or Windows binary,
+      # so it re-checks the asset set, the sidecars and the archive layout;
+      # the build leg has already run each binary on its own platform.
+      - name: Check the asset set, sidecars and layout
+        run: python scripts/package.py verify --dist audit-dist --no-smoke
+
+  publish:
+    name: Publish release
+    needs: [prepare, audit, verify-upstream]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release edit "$TAG" --draft=false

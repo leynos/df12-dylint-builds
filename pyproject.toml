@@ -1,0 +1,30 @@
+[project]
+name = "df12-dylint-builds"
+version = "0.0.0"
+description = "Prebuilt Dylint release archives for the platforms upstream does not publish"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "ISC"}
+authors = [{name = "Payton McIntosh", email = "pmcintosh@df12.net"}]
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<10",
+    "pyyaml>=6,<7",
+    "hypothesis>=6,<7",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["F", "W", "E", "I", "B", "UP", "D", "N", "SIM", "PTH", "RUF"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["scripts"]
+addopts = "-p no:cacheprovider"

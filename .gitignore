@@ -1,0 +1,15 @@
+dist/
+audit-dist/
+upstream-dist/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+.uv-cache/
+.uv-tools/
+.venv/
+.grepai/
+.claude/
+*.swp
+*~
