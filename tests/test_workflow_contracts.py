@@ -227,18 +227,18 @@ def test_the_published_names_match_upstreams_pattern(config: Config) -> None:
 
 
 def test_the_release_publishes_every_configured_archive(config: Config) -> None:
-    """Both binaries are published for both targets, with a zip only on Windows.
+    """Both binaries are published for every target, in every format it declares.
 
-    Mutation: dropping ``dylint-link`` from dylint.toml's binaries failed this
-    contract.
+    The version is taken from the configuration rather than written out, so a
+    routine upstream bump does not have to be repeated here. Mutation:
+    dropping ``dylint-link`` from dylint.toml's binaries failed this contract.
     """
+    assert set(config.binaries) == {"cargo-dylint", "dylint-link"}
     assert set(config.released_archive_names()) == {
-        "cargo-dylint-x86_64-apple-darwin-v6.0.4.tar.gz",
-        "dylint-link-x86_64-apple-darwin-v6.0.4.tar.gz",
-        "cargo-dylint-x86_64-pc-windows-msvc-v6.0.4.tar.gz",
-        "cargo-dylint-x86_64-pc-windows-msvc-v6.0.4.zip",
-        "dylint-link-x86_64-pc-windows-msvc-v6.0.4.tar.gz",
-        "dylint-link-x86_64-pc-windows-msvc-v6.0.4.zip",
+        f"{binary}-{target}-v{config.version}.{fmt}"
+        for binary in ("cargo-dylint", "dylint-link")
+        for target in config.target_triples
+        for fmt in config.target(target).formats
     }
 
 
@@ -298,7 +298,12 @@ def test_the_upstream_job_downloads_and_verifies_upstreams_sidecars(
     assert job["runs-on"] == "${{ needs.prepare.outputs.upstream_runner }}"
     commands = steps_running(release, "verify-upstream", "scripts/verify_upstream.py")
     assert len(commands) == 1, commands
-    assert config.upstream.targets == ("x86_64-unknown-linux-gnu",)
+    # The upstream list is authoritative twice over: it decides what is
+    # checked, and the configuration refuses to build anything on it.
+    assert set(config.upstream.targets) == {
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+    }
     assert not any(
         pattern.search(command)
         for _, command in run_commands(release)
@@ -325,7 +330,7 @@ def test_dylint_is_checked_out_at_the_pinned_commit(
     ]
     assert len(checkouts) == 1, checkouts
     assert checkouts[0]["with"]["ref"] == "${{ needs.prepare.outputs.commit }}"
-    assert config.commit == "09bf11417d8cfc4d0c2ef9053898c6a9f378f794"
+    assert re.fullmatch(r"[0-9a-f]{40}", config.commit), config.commit
 
 
 def test_the_build_command_matches_upstreams(release: dict[str, Any]) -> None:

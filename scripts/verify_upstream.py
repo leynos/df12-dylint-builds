@@ -8,6 +8,7 @@ publishes, so a consumer can treat every target the same way.
 from __future__ import annotations
 
 import argparse
+import http.client
 import sys
 import time
 import urllib.error
@@ -23,6 +24,9 @@ ATTEMPTS: Final = 4
 BACKOFF_SECONDS: Final = 5
 TIMEOUT_SECONDS: Final = 120
 USER_AGENT: Final = "df12-dylint-builds"
+# Statuses worth another attempt. Anything else is the server saying no,
+# and asking again four times only delays the failure.
+RETRYABLE_STATUSES: Final = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 
 def download(
@@ -32,26 +36,79 @@ def download(
     attempts: int = ATTEMPTS,
     backoff: float = BACKOFF_SECONDS,
 ) -> Path:
-    """Download ``url`` to ``destination``, retrying transient failures."""
+    """Download ``url`` to ``destination``, retrying transient failures.
+
+    Parameters
+    ----------
+    url:
+        The address to fetch.
+    destination:
+        Where to write the response body. Nothing is written unless the whole
+        body arrives, so a truncated response cannot be mistaken for an
+        archive.
+    attempts:
+        How many times to try before giving up.
+    backoff:
+        Seconds to wait after the first failure, scaled by the attempt number.
+
+    Returns
+    -------
+    Path
+        ``destination``.
+
+    Raises
+    ------
+    PackagingError
+        If the server returns a status that will not change on a retry, or if
+        every attempt fails.
+    """
     last: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
             request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-                destination.write_bytes(response.read())
-        except (urllib.error.URLError, OSError) as error:
+                payload = response.read()
+        except urllib.error.HTTPError as error:
+            if error.code not in RETRYABLE_STATUSES:
+                raise PackagingError(
+                    f"{url}: server returned HTTP {error.code}"
+                ) from error
             last = error
-            if attempt == attempts:
-                break
-            print(f"attempt {attempt} for {url} failed: {error}; retrying")
-            time.sleep(backoff * attempt)
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
+            # A truncated body arrives here as an IncompleteRead, so a short
+            # response is retried rather than written out as an archive.
+            last = error
         else:
+            destination.write_bytes(payload)
             return destination
+        if attempt == attempts:
+            break
+        print(f"attempt {attempt} for {url} failed: {last}; retrying")
+        time.sleep(backoff * attempt)
     raise PackagingError(f"could not download {url} after {attempts} attempts: {last}")
 
 
 def verify_upstream(config: Config, work: Path) -> list[str]:
-    """Download and verify every upstream archive, returning their digests."""
+    """Download and verify every upstream archive.
+
+    Parameters
+    ----------
+    config:
+        The configuration naming the upstream tag, targets and binaries.
+    work:
+        A directory to download into; it is created if it does not exist.
+
+    Returns
+    -------
+    list of str
+        The digest of each archive, in the order they were checked.
+
+    Raises
+    ------
+    PackagingError
+        If a download fails, or if an archive does not match its sidecar or
+        the layout this repository publishes under.
+    """
     work.mkdir(parents=True, exist_ok=True)
     digests: list[str] = []
     for target in config.upstream.targets:
@@ -67,7 +124,18 @@ def verify_upstream(config: Config, work: Path) -> list[str]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the command-line interface."""
+    """Run the command-line interface.
+
+    Parameters
+    ----------
+    argv:
+        Arguments to parse, defaulting to ``sys.argv[1:]``.
+
+    Returns
+    -------
+    int
+        Zero when every upstream archive verified, one otherwise.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", help="path to dylint.toml")
     parser.add_argument("--work-dir", default="upstream-dist")

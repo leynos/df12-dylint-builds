@@ -48,9 +48,15 @@ cargo-dylint-x86_64-apple-darwin-v6.0.4/
 cargo-dylint-x86_64-apple-darwin-v6.0.4/cargo-dylint
 ```
 
-On Windows the executable carries `.exe`. The file is stored with mode
-`0755`, in the zip as well as the tar, so extracting on a POSIX host yields
-something runnable without a `chmod`.
+On Windows the executable carries `.exe`. The file is recorded with mode
+`0755`, in the zip as well as the tar, and the zip's entries are marked as
+Unix-created so that the mode is not discarded.
+
+Whether the extracted file is executable depends on the extractor. GNU
+`tar`, `bsdtar` and `unzip` apply the recorded mode. Python's
+`zipfile.extractall` and `shutil.unpack_archive` do not: they ignore the
+mode entirely and leave the file unreadable to `exec`. If extraction goes
+through one of those, `chmod +x` the binary afterwards.
 
 ## Checksums
 
@@ -71,8 +77,15 @@ A consumer needs one verification path for all four targets.
 
 - No detached signatures. Upstream signs its archives with minisign using a
   key generated inside its release run; there is no stable public key to
-  pin, so a signature here would add ceremony without adding trust. The
-  sidecar digests are the integrity mechanism.
+  pin, so a signature here would add ceremony without adding trust.
+
+  This means the sidecars detect corruption, not forgery. A sidecar travels
+  with the archive it describes, so checking one against the other proves
+  only that the download arrived intact. It cannot detect anyone who can
+  replace both assets, which is anyone who can publish to this repository.
+  A consumer that needs more than corruption detection should record a
+  digest at the point it first vets a release and pin that, rather than
+  re-reading the sidecar on each fetch.
 - No `aarch64-apple-darwin`. Upstream builds it from v6.0.5 onwards.
 - No archives for any target upstream already publishes. Take those from
   upstream.

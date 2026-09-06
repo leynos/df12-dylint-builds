@@ -39,7 +39,7 @@ formats = ["tar.gz", "zip"]
 [upstream]
 runner = "ubuntu-24.04"
 releases_url = "https://github.com/trailofbits/dylint/releases/download"
-targets = ["x86_64-unknown-linux-gnu"]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 """
 
 # A target with no ``.exe`` suffix and one archive format, so tests that do

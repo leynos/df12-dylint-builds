@@ -26,10 +26,12 @@ extractor by file extension.
 | Archive | `cargo-dylint-x86_64-apple-darwin-v6.0.4.tar.gz` |
 | Sidecar | `cargo-dylint-x86_64-apple-darwin-v6.0.4.tar.gz.sha256` |
 | Windows zip | `dylint-link-x86_64-pc-windows-msvc-v6.0.4.zip` |
+| Windows zip sidecar | `dylint-link-x86_64-pc-windows-msvc-v6.0.4.zip.sha256` |
 
-Every archive holds one directory, named for the archive stem, containing
-one executable. That is upstream's layout, and the release verifies
-upstream's own archives against the same rule.
+Every archive has a sidecar, the zip included, and holds one directory,
+named for the archive stem, containing one executable. That is upstream's
+layout, and the release verifies upstream's own archives against the same
+rule.
 
 See [the users' guide](docs/users-guide.md) for the full consumer contract.
 

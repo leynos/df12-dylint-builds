@@ -8,7 +8,6 @@ import pytest
 from conftest import (
     FIXTURE_COMMIT,
     FIXTURE_CONFIG,
-    FIXTURE_VERSION,
     POSIX_TARGET,
     WINDOWS_TARGET,
 )
@@ -36,8 +35,13 @@ def repo_config() -> Config:
 
 
 def test_the_repository_configuration_parses(repo_config: Config) -> None:
-    """The committed dylint.toml is valid and names the version it builds."""
-    assert repo_config.version == FIXTURE_VERSION
+    """The committed dylint.toml is valid and publishes both binaries.
+
+    The version is deliberately not asserted here: bumping it is the whole
+    of a routine upstream move, and a test that pinned it would only ever
+    report that the move happened.
+    """
+    assert repo_config.tag == f"v{repo_config.version}"
     assert repo_config.binaries == ("cargo-dylint", "dylint-link")
 
 
@@ -94,10 +98,12 @@ def test_the_tar_names_match_the_upstream_pattern(fixture_config: Config) -> Non
 
 def test_the_upstream_names_match_the_published_assets(fixture_config: Config) -> None:
     """The names the release downloads are the assets upstream actually has."""
-    assert fixture_config.upstream_archive_names() == (
+    assert set(fixture_config.upstream_archive_names()) == {
         "cargo-dylint-x86_64-unknown-linux-gnu-v6.0.4.tar.gz",
         "dylint-link-x86_64-unknown-linux-gnu-v6.0.4.tar.gz",
-    )
+        "cargo-dylint-aarch64-unknown-linux-gnu-v6.0.4.tar.gz",
+        "dylint-link-aarch64-unknown-linux-gnu-v6.0.4.tar.gz",
+    }
 
 
 def test_the_upstream_url_uses_the_pinned_tag(fixture_config: Config) -> None:
@@ -184,7 +190,7 @@ def test_the_matrix_carries_each_target_once(fixture_config: Config) -> None:
         ),
         pytest.param(
             (
-                'targets = ["x86_64-unknown-linux-gnu"]',
+                'targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]',
                 'targets = ["x86_64-apple-darwin"]',
             ),
             "overlap",

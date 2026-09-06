@@ -14,11 +14,13 @@ from conftest import (
     requires_posix_exec,
     write_stubs,
 )
-from dylint_config import Config
+from dylint_config import Config, exe_suffix
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from package import (
+    UNIX_CREATE_SYSTEM,
     PackagingError,
+    check_layout,
     check_sidecar,
     expected_assets,
     extract,
@@ -131,29 +133,77 @@ def test_the_windows_archives_carry_the_exe_suffix(
 def test_the_windows_zip_records_an_executable_mode(
     fixture_config: Config, tmp_path: Path
 ) -> None:
-    """A consumer extracting the zip on a POSIX host still gets an executable."""
+    """A consumer extracting the zip on a POSIX host still gets an executable.
+
+    A POSIX extractor honours the mode bits only on an entry that claims Unix
+    origin, and ``ZipInfo`` defaults to MS-DOS when it is constructed on
+    Windows, which is where this archive is packed. Both halves are asserted:
+    the mode and the origin that makes it mean anything.
+    """
     source = write_stubs(tmp_path / "release", exe_suffix=".exe")
     dist = tmp_path / "dist"
     pack(fixture_config, WINDOWS_TARGET, source, dist)
     stem = fixture_config.stem("dylint-link", WINDOWS_TARGET)
     with zipfile.ZipFile(dist / f"{stem}.zip") as archive:
+        infos = archive.infolist()
         info = archive.getinfo(f"{stem}/dylint-link.exe")
+    assert [entry.create_system for entry in infos] == [UNIX_CREATE_SYSTEM] * len(infos)
     assert (info.external_attr >> 16) & 0o111
 
 
-def test_packaging_is_deterministic(
-    fixture_config: Config, stub_source: Path, tmp_path: Path
+def test_a_zip_entry_of_msdos_origin_fails_the_layout_check(
+    fixture_config: Config, tmp_path: Path
 ) -> None:
-    """Packaging the same binary twice yields the same digest.
+    """An entry whose mode a POSIX extractor would discard is not executable.
 
-    Timestamps and ownership are fixed so a rebuild can be compared against a
-    published sidecar.
+    Reading the raw attribute bits would pass this archive, which is how the
+    defect this guards against would have shipped.
     """
+    source = write_stubs(tmp_path / "release", exe_suffix=".exe")
+    dist = tmp_path / "dist"
+    pack(fixture_config, WINDOWS_TARGET, source, dist)
+    stem = fixture_config.stem("cargo-dylint", WINDOWS_TARGET)
+    original = dist / f"{stem}.zip"
+    rebuilt = tmp_path / "msdos.zip"
+    with zipfile.ZipFile(original) as source_zip, zipfile.ZipFile(rebuilt, "w") as zf:
+        for info in source_zip.infolist():
+            copy = zipfile.ZipInfo(info.filename, date_time=info.date_time)
+            copy.create_system = 0
+            copy.external_attr = info.external_attr
+            zf.writestr(copy, source_zip.read(info.filename))
+    with pytest.raises(PackagingError, match="is not executable"):
+        check_layout(rebuilt, stem, "cargo-dylint.exe")
+
+
+@pytest.mark.parametrize(
+    ("target", "name"),
+    [
+        pytest.param(
+            POSIX_TARGET,
+            "cargo-dylint-x86_64-apple-darwin-v6.0.4.tar.gz",
+            id="tar-gz",
+        ),
+        pytest.param(
+            WINDOWS_TARGET,
+            "cargo-dylint-x86_64-pc-windows-msvc-v6.0.4.zip",
+            id="zip",
+        ),
+    ],
+)
+def test_packaging_is_deterministic(
+    fixture_config: Config, tmp_path: Path, target: str, name: str
+) -> None:
+    """Packaging the same binary twice yields the same digest, in both formats.
+
+    Timestamps, ownership and the zip's originating system are fixed so a
+    rebuild can be compared against a published sidecar, and so the same
+    binary packed on a different host gives the same archive.
+    """
+    source = write_stubs(tmp_path / "release", exe_suffix=exe_suffix(target))
     first = tmp_path / "first"
     second = tmp_path / "second"
-    pack(fixture_config, POSIX_TARGET, stub_source, first)
-    pack(fixture_config, POSIX_TARGET, stub_source, second)
-    name = "cargo-dylint-x86_64-apple-darwin-v6.0.4.tar.gz"
+    pack(fixture_config, target, source, first)
+    pack(fixture_config, target, source, second)
     assert (first / name).read_bytes() == (second / name).read_bytes()
 
 

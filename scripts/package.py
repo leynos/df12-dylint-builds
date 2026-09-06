@@ -32,6 +32,9 @@ from dylint_config import Config, ConfigError, default_config_path, load_config
 FIXED_MTIME: Final = 315532800
 DIR_MODE: Final = 0o755
 EXE_MODE: Final = 0o755
+# The zip "created by" code for Unix. Only entries carrying it have their
+# mode bits honoured by a POSIX extractor.
+UNIX_CREATE_SYSTEM: Final = 3
 CHUNK: Final = 1 << 20
 SMOKE_TIMEOUT: Final = 120
 
@@ -127,10 +130,16 @@ def _zip_archive(archive: Path, stem: str, binary_path: Path) -> None:
     fixed = (1980, 1, 1, 0, 0, 0)
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         directory = zipfile.ZipInfo(f"{stem}/", date_time=fixed)
+        directory.create_system = UNIX_CREATE_SYSTEM
         directory.external_attr = (stat.S_IFDIR | DIR_MODE) << 16 | 0x10
         zf.writestr(directory, b"")
 
         member = zipfile.ZipInfo(f"{stem}/{binary_path.name}", date_time=fixed)
+        # ZipInfo defaults create_system to MS-DOS when it is built on
+        # Windows, and a POSIX extractor ignores the Unix mode bits of an
+        # MS-DOS entry. The Windows leg packs this archive, so the field is
+        # set explicitly or the recorded mode would be silently discarded.
+        member.create_system = UNIX_CREATE_SYSTEM
         member.compress_type = zipfile.ZIP_DEFLATED
         member.external_attr = (stat.S_IFREG | EXE_MODE) << 16
         zf.writestr(member, binary_path.read_bytes())
@@ -196,8 +205,13 @@ def _archive_members(archive: Path) -> tuple[list[str], dict[str, int]]:
     with zipfile.ZipFile(archive) as zf:
         infos = zf.infolist()
     names = sorted(info.filename.rstrip("/") for info in infos)
+    # An entry that does not claim Unix origin has no mode a POSIX extractor
+    # will honour, so it is reported as having none rather than as having
+    # whatever happens to sit in the upper attribute bits.
     modes = {
         info.filename: (info.external_attr >> 16) & 0o7777
+        if info.create_system == UNIX_CREATE_SYSTEM
+        else 0
         for info in infos
         if not info.is_dir()
     }
@@ -284,6 +298,9 @@ def verify(config: Config, archive: Path, *, run_smoke: bool = True) -> str:
                 / config.stem(binary, target)
                 / f"{binary}{config.target(target).exe_suffix}"
             )
+            # The recorded mode has already been checked by check_layout.
+            # Python's extractors discard it, so the bit is restored here to
+            # run the binary rather than to assert anything about it.
             exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
             smoke_test(config, binary, exe)
     return digest
