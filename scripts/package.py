@@ -49,7 +49,15 @@ class PackagingError(RuntimeError):
 # archive and filesystem libraries. None of these mean anything to a caller
 # on its own, so every read boundary turns them into a PackagingError that
 # names the file, which is the only error the command line handles.
-READ_ERRORS: Final = (OSError, EOFError, tarfile.TarError, zipfile.BadZipFile)
+# UnicodeDecodeError is a ValueError rather than an OSError, so a sidecar
+# holding bytes that are not UTF-8 escapes unless it is named here.
+READ_ERRORS: Final = (
+    OSError,
+    EOFError,
+    UnicodeDecodeError,
+    tarfile.TarError,
+    zipfile.BadZipFile,
+)
 
 
 @contextlib.contextmanager

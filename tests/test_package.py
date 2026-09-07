@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from conftest import (
+    FIXTURE_CONFIG,
     POSIX_TARGET,
     WINDOWS_TARGET,
     requires_posix_exec,
@@ -36,6 +37,7 @@ from package import (
     verify_dist,
     write_sidecar,
 )
+from package import main as package_main
 
 # One of upstream's own sidecars, byte for byte, from
 # cargo-dylint-x86_64-unknown-linux-gnu-v6.0.4.tar.gz.sha256.
@@ -408,6 +410,50 @@ def test_a_damaged_archive_is_reported_rather_than_raised_raw(
     write_sidecar(archive)
     with pytest.raises(PackagingError, match="could not read"):
         inspect_archive(fixture_config, archive)
+
+
+def test_a_sidecar_that_is_not_utf8_is_refused(
+    fixture_config: Config, packed_dist: Path
+) -> None:
+    """A sidecar of arbitrary bytes is a packaging error, not a decode error.
+
+    ``UnicodeDecodeError`` is a ``ValueError``, not an ``OSError``, so it
+    was not caught by the read boundary and escaped every handler.
+    """
+    archive = packed_dist / fixture_config.archive_name(
+        "cargo-dylint", POSIX_TARGET, "tar.gz"
+    )
+    sidecar = archive.with_name(archive.name + ".sha256")
+    sidecar.write_bytes(b"\xff\xfe" + b"0" * 62 + b"  " + archive.name.encode() + b"\n")
+    with pytest.raises(PackagingError, match="could not read the sidecar"):
+        inspect_archive(fixture_config, archive)
+
+
+def test_the_command_line_reports_a_damaged_asset_and_exits_one(
+    fixture_config: Config,
+    packed_dist: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The read boundary exists to serve the command line, so test it there.
+
+    ``main`` handles only ``ConfigError`` and ``PackagingError``. Anything
+    else leaves a traceback in the release log naming a Python frame rather
+    than the asset that failed, which is what the boundary prevents.
+    """
+    config_path = tmp_path / "dylint.toml"
+    config_path.write_text(FIXTURE_CONFIG, encoding="utf-8")
+    archive = packed_dist / fixture_config.archive_name(
+        "cargo-dylint", POSIX_TARGET, "tar.gz"
+    )
+    archive.with_name(archive.name + ".sha256").write_bytes(b"\xff\xfe\n")
+    status = package_main(
+        ["--config", str(config_path), "verify", "--no-smoke", str(archive)]
+    )
+    assert status == 1, "a damaged asset must fail the command, not crash it"
+    assert "error: " in capsys.readouterr().err, (
+        "the failure must be reported on stderr as a diagnosis"
+    )
 
 
 def test_a_binary_that_never_finishes_fails_the_smoke_test(
