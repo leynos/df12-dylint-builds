@@ -151,4 +151,19 @@ Triggered by a `v*` tag push. In order:
    binaries; that has already happened on each build leg.
 6. `publish` clears the draft flag.
 
-Only `create-release`, `build` and `publish` hold `contents: write`.
+### Permissions and the draft
+
+The workflow defaults to `contents: read`. Four jobs raise it to
+`contents: write`: `create-release`, `build`, `audit` and `publish`.
+
+`audit` is the surprising one, because it only reads. A draft release is
+visible only to a token with push access, so with `contents: read` the API
+answers "release not found" for a draft that plainly exists, and the audit
+fails having checked nothing. Run 34208473988 lost a release to this: both
+build legs succeeded and uploaded all twelve assets, and the audit could not
+see the draft holding them.
+
+A contract asserts the audit job's permission for that reason, and a second
+asserts that the set of jobs holding write is exactly those four, so the
+grant cannot spread to `prepare` or `verify-upstream`, neither of which
+touches the release.

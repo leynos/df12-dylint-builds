@@ -168,6 +168,13 @@ jobs:
     needs: [prepare, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # A draft release is visible only to a token with push access, so this
+    # job needs contents: write to read one. With contents: read the API
+    # answers "release not found" for a draft that exists, and the audit
+    # fails having checked nothing (run 34208473988). The job never writes:
+    # it downloads the draft and re-checks it.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
