@@ -412,13 +412,16 @@ def test_a_published_release_is_never_rebuilt(release: dict[str, Any]) -> None:
     assert "exit 1" in guards[0]
 
 
-def test_write_permission_is_confined_to_the_jobs_that_publish(
+def test_write_permission_is_confined_to_the_jobs_that_touch_the_release(
     release: dict[str, Any],
 ) -> None:
-    """Only the jobs that touch the release carry contents: write.
+    """Only the jobs that reach the release carry contents: write.
 
-    Mutation: granting ``contents: write`` to the audit job failed this
-    contract.
+    The default is read, and the three jobs that neither create, upload to,
+    read nor publish the release keep it.
+
+    Mutation: granting ``contents: write`` to the ``prepare`` job failed
+    this contract.
     """
     assert release["permissions"] == {"contents": "read"}
     writers = {
@@ -426,7 +429,24 @@ def test_write_permission_is_confined_to_the_jobs_that_publish(
         for job, spec in jobs_of(release).items()
         if spec.get("permissions", {}).get("contents") == "write"
     }
-    assert writers == {"create-release", "build", "publish"}
+    assert writers == {"create-release", "build", "audit", "publish"}
+
+
+def test_the_audit_can_see_the_draft_it_audits(release: dict[str, Any]) -> None:
+    """The audit job carries the permission a draft release requires to read.
+
+    A draft is visible only to a token with push access. With
+    ``contents: read`` the API answers "release not found" for a draft that
+    exists, so the audit fails having checked nothing; run 34208473988 lost
+    a release to exactly this. The job still only reads.
+
+    Mutation: removing the audit job's ``permissions`` block, so that it
+    inherits the workflow's ``contents: read``, failed this contract.
+    """
+    audit = jobs_of(release)["audit"]
+    assert audit.get("permissions", {}).get("contents") == "write", (
+        "the audit job cannot download a draft release without push access"
+    )
 
 
 # --- the CI workflow --------------------------------------------------------
