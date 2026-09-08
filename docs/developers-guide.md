@@ -167,3 +167,29 @@ A contract asserts the audit job's permission for that reason, and a second
 asserts that the set of jobs holding write is exactly those four, so the
 grant cannot spread to `prepare` or `verify-upstream`, neither of which
 touches the release.
+
+### When a release fails
+
+Two cases, and they are not the same.
+
+If the workflow is right and a job failed for a transient reason, re-run
+the failed jobs. `create-release` resumes a draft left by an earlier run of
+the same tag, and refuses a tag that is already published, so a retry
+cannot alter what a consumer has already seen.
+
+If the workflow itself is wrong, the tag cannot be re-run. A re-run uses the
+workflow file as it was at that tag, so it will fail the same way. Fix the
+workflow, merge it, and push the next build number. **This is what the build
+number is for.** It distinguishes a repackaging of the same upstream release
+from a new upstream release, so a broken run costs a build number rather
+than a version.
+
+`v6.0.4+build.1` is the worked example. Both legs built and uploaded all
+twelve assets, the audit could not see the draft, and the fix was a change
+to the workflow. It was abandoned in favour of `v6.0.4+build.2`, and its
+draft release and tag were deleted so that the only tag in the repository is
+one that published.
+
+Never delete or re-push a tag whose release was published. Consumers pin the
+digests in its sidecars, and a published release is immutable by design; the
+draft of a failed run is the only thing that may be discarded.
