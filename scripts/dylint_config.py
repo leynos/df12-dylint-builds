@@ -10,7 +10,7 @@ from __future__ import annotations
 import dataclasses as dc
 import re
 import tomllib
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
@@ -275,13 +275,6 @@ def default_config_path() -> Path:
     return Path(__file__).resolve().parents[1] / "dylint.toml"
 
 
-def iter_binary_targets(config: Config) -> Iterator[tuple[str, Target]]:
-    """Yield every (binary, target) pair the repository builds."""
-    for target in config.targets:
-        for binary in config.binaries:
-            yield binary, target
-
-
 __all__: Sequence[str] = (
     "Config",
     "ConfigError",
@@ -289,7 +282,6 @@ __all__: Sequence[str] = (
     "Upstream",
     "default_config_path",
     "exe_suffix",
-    "iter_binary_targets",
     "load_config",
     "parse_config",
 )

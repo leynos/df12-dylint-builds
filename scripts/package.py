@@ -364,16 +364,33 @@ def smoke_test(config: Config, binary: str, exe: Path) -> str:
         raise PackagingError(
             f"{exe.name}: the packaged binary did not start: {error}"
         ) from error
+    return _judge_smoke_output(config, binary, exe, completed)
+
+
+def _judge_smoke_output(
+    config: Config,
+    binary: str,
+    exe: Path,
+    completed: subprocess.CompletedProcess[str],
+) -> str:
+    """Decide whether what the binary reported is what it should have.
+
+    ``cargo-dylint`` is judged on its version line, which is the one thing
+    that proves the archive holds the build it claims. ``dylint-link``
+    forwards to the platform linker and has no version of its own, so it is
+    judged only on having started and said something.
+    """
     output = completed.stdout + completed.stderr
-    if binary == "cargo-dylint":
-        expected = f"cargo-dylint {config.version}"
-        if completed.returncode != 0 or expected not in completed.stdout:
-            raise PackagingError(
-                f"{exe.name}: expected {expected!r} on stdout, got "
-                f"exit {completed.returncode} and {output!r}"
-            )
-    elif not output.strip():
-        raise PackagingError(f"{exe.name}: ran but produced no output")
+    if binary != "cargo-dylint":
+        if not output.strip():
+            raise PackagingError(f"{exe.name}: ran but produced no output")
+        return output
+    expected = f"cargo-dylint {config.version}"
+    if completed.returncode != 0 or expected not in completed.stdout:
+        raise PackagingError(
+            f"{exe.name}: expected {expected!r} on stdout, got "
+            f"exit {completed.returncode} and {output!r}"
+        )
     return output
 
 

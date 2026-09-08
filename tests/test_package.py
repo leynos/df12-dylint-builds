@@ -451,8 +451,12 @@ def test_the_command_line_reports_a_damaged_asset_and_exits_one(
         ["--config", str(config_path), "verify", "--no-smoke", str(archive)]
     )
     assert status == 1, "a damaged asset must fail the command, not crash it"
-    assert "error: " in capsys.readouterr().err, (
-        "the failure must be reported on stderr as a diagnosis"
+    stderr = capsys.readouterr().err
+    assert "could not read the sidecar" in stderr, (
+        "the failure must say which check gave up, not merely that one did"
+    )
+    assert f"{archive.name}.sha256" in stderr, (
+        "the failure must name the asset it could not read"
     )
 
 

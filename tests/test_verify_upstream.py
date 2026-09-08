@@ -6,6 +6,7 @@ import functools
 import http.server
 import tarfile
 import threading
+import typing
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -13,13 +14,38 @@ import pytest
 from conftest import FIXTURE_COMMIT, FIXTURE_CONFIG, write_stubs
 from dylint_config import parse_config
 from package import PackagingError, pack, write_sidecar
-from verify_upstream import download, verify_upstream
+from verify_upstream import download, main, verify_upstream
 
 UPSTREAM_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")
 
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
     """A file server that does not narrate every request to the test output."""
+
+    def log_message(self, *args: object) -> None:
+        """Discard the access log."""
+
+
+class _FlakyHandler(http.server.BaseHTTPRequestHandler):
+    """Answer 503 once per path, then serve the real bytes.
+
+    A retryable status is not a permanent one, and the only way to tell the
+    two apart is to serve a status that later succeeds.
+    """
+
+    served: typing.ClassVar[set[str]] = set()
+    payload: typing.ClassVar[bytes] = b"recovered"
+
+    def do_GET(self) -> None:
+        """Fail the first request for a path and satisfy the second."""
+        if self.path not in self.served:
+            self.served.add(self.path)
+            self.send_error(503, "try again")
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(self.payload)))
+        self.end_headers()
+        self.wfile.write(self.payload)
 
     def log_message(self, *args: object) -> None:
         """Discard the access log."""
@@ -224,3 +250,86 @@ def test_a_truncated_response_is_retried_and_never_written(
     with pytest.raises(PackagingError, match="after 2 attempts"):
         download(f"{truncating_server}/anything", destination, attempts=2, backoff=0)
     assert not destination.exists(), "a truncated body must not be written out"
+
+
+@pytest.fixture
+def flaky_server() -> Iterator[str]:
+    """Serve one 503 per path before serving the real bytes."""
+    _FlakyHandler.served = set()
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FlakyHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_a_retryable_status_is_retried_and_then_succeeds(
+    flaky_server: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A 503 is a request to come back, so the download comes back.
+
+    Mutation: treating every HTTP status as permanent, by removing the
+    ``RETRYABLE_STATUSES`` test, passes every other download test. Only this
+    one distinguishes a status worth retrying from one that is not.
+    """
+    destination = download(f"{flaky_server}/asset.tar.gz", tmp_path / "out", backoff=0)
+    assert destination.read_bytes() == _FlakyHandler.payload, (
+        "the retry must write the body of the attempt that succeeded"
+    )
+    assert "retrying" in capsys.readouterr().out, (
+        "a retryable status must say it is coming back"
+    )
+
+
+def test_the_command_line_verifies_upstream_and_exits_zero(
+    upstream_server: tuple[str, Path], tmp_path: Path
+) -> None:
+    """The release and CI workflows invoke this entry point, so it is tested."""
+    base_url, root = upstream_server
+    _publish_upstream_fixture(root, tmp_path)
+    config_path = tmp_path / "dylint.toml"
+    config_path.write_text(_serving_config(base_url), encoding="utf-8")
+    status = main(["--config", str(config_path), "--work-dir", str(tmp_path / "work")])
+    assert status == 0, "a verified upstream must exit zero"
+
+
+def test_the_command_line_reports_a_corrupt_upstream_archive(
+    upstream_server: tuple[str, Path],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A failure names the archive on stderr and exits one, rather than raising.
+
+    ``main`` handles only ``ConfigError`` and ``PackagingError``; anything
+    else would reach the release log as a traceback.
+    """
+    base_url, root = upstream_server
+    _publish_upstream_fixture(root, tmp_path)
+    archive = root / f"cargo-dylint-{UPSTREAM_TARGETS[0]}-v6.0.4.tar.gz"
+    archive.write_bytes(archive.read_bytes() + b"corrupt")
+    config_path = tmp_path / "dylint.toml"
+    config_path.write_text(_serving_config(base_url), encoding="utf-8")
+    status = main(["--config", str(config_path), "--work-dir", str(tmp_path / "work")])
+    assert status == 1, "a corrupt upstream archive must fail the command"
+    stderr = capsys.readouterr().err
+    assert "does not match sidecar" in stderr, (
+        "the failure must say what was wrong with the archive"
+    )
+    assert archive.name in stderr, "the failure must name the archive that failed"
+
+
+def test_the_command_line_reports_an_unreadable_configuration(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A bad configuration is the other error the entry point handles."""
+    config_path = tmp_path / "dylint.toml"
+    config_path.write_text("schema_version = 1\n", encoding="utf-8")
+    status = main(["--config", str(config_path), "--work-dir", str(tmp_path / "work")])
+    assert status == 1, "an invalid configuration must fail the command"
+    assert "error: " in capsys.readouterr().err, (
+        "a configuration failure must be reported on stderr"
+    )
