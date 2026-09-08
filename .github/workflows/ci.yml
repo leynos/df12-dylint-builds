@@ -1,0 +1,57 @@
+name: CI
+
+'on':
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Lint, format and workflow contracts
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Setup uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        with:
+          enable-cache: false
+      - name: Markdown lint
+        uses: DavidAnson/markdownlint-cli2-action@8de2aa07cae85fd17c0b35642db70cf5495f1d25
+        with:
+          globs: |
+            **/*.md
+            !**/.uv-cache/**
+            !**/.uv-tools/**
+      - name: Check formatting
+        run: make check-fmt
+      - name: Lint Python
+        run: make ruff
+      - name: Unit tests and workflow contracts
+        run: make test
+
+  upstream-parity:
+    name: Upstream sidecar and layout parity
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.13'
+      # The consumer contract rests on our sidecars matching upstream's. A
+      # pull request that changes either check is proved against upstream's
+      # live assets here, not only against fixtures.
+      - name: Download and check upstream's archives
+        run: python scripts/verify_upstream.py --work-dir upstream-dist
