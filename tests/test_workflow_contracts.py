@@ -417,19 +417,28 @@ def test_write_permission_is_confined_to_the_jobs_that_touch_the_release(
 ) -> None:
     """Only the jobs that reach the release carry contents: write.
 
-    The default is read, and the three jobs that neither create, upload to,
-    read nor publish the release keep it.
+    The default is read, and the two jobs that neither create, upload to,
+    read nor publish the release keep it: `prepare` and `verify-upstream`.
 
     Mutation: granting ``contents: write`` to the ``prepare`` job failed
     this contract.
     """
-    assert release["permissions"] == {"contents": "read"}
+    assert release["permissions"] == {"contents": "read"}, (
+        "the workflow default must be contents: read, so that a job holding "
+        "write says so itself rather than inheriting it: "
+        f"{release['permissions']}"
+    )
     writers = {
         job
         for job, spec in jobs_of(release).items()
         if spec.get("permissions", {}).get("contents") == "write"
     }
-    assert writers == {"create-release", "build", "audit", "publish"}
+    expected_writers = {"create-release", "build", "audit", "publish"}
+    assert writers == expected_writers, (
+        "contents: write belongs to exactly the jobs that reach the release; "
+        f"{sorted(writers - expected_writers)} gained it and "
+        f"{sorted(expected_writers - writers)} lost it"
+    )
 
 
 def test_the_audit_can_see_the_draft_it_audits(release: dict[str, Any]) -> None:
@@ -446,6 +455,43 @@ def test_the_audit_can_see_the_draft_it_audits(release: dict[str, Any]) -> None:
     audit = jobs_of(release)["audit"]
     assert audit.get("permissions", {}).get("contents") == "write", (
         "the audit job cannot download a draft release without push access"
+    )
+
+
+def test_the_audits_download_is_given_the_token_the_grant_provides(
+    release: dict[str, Any],
+) -> None:
+    """The step that reads the draft receives the job's token and repository.
+
+    The permission grant is necessary and not sufficient. ``gh`` reads its
+    credentials from the environment, so a job holding ``contents: write``
+    whose download step is handed no ``GH_TOKEN`` fails exactly as the
+    unprivileged run did, with the draft reported as not found. Asserting
+    the grant alone would pass with the token deleted, which is the state
+    that reproduces run 34208473988.
+
+    ``GH_REPO`` travels with it because ``gh release download`` outside a
+    checkout with credentials has no repository to infer.
+
+    Mutation: deleting ``GH_TOKEN`` from the download step's ``env``, and
+    separately deleting ``GH_REPO``, each failed this contract.
+    """
+    downloads = [
+        step
+        for step in steps_of(release, "audit")
+        if "gh release download" in step.get("run", "")
+    ]
+    assert len(downloads) == 1, (
+        f"the audit reads the draft in exactly one step; found {len(downloads)}"
+    )
+    env = downloads[0].get("env", {})
+    assert env.get("GH_TOKEN") == "${{ secrets.GITHUB_TOKEN }}", (
+        "the download step must be handed the job's token, or the write "
+        f"permission never reaches gh: {env.get('GH_TOKEN')!r}"
+    )
+    assert env.get("GH_REPO") == "${{ github.repository }}", (
+        "the download step must name the repository, since the checkout "
+        f"persists no credentials to infer it from: {env.get('GH_REPO')!r}"
     )
 
 

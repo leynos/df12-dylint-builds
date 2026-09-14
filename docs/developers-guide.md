@@ -155,10 +155,10 @@ Triggered by a `v*` tag push. In order:
 The workflow defaults to `contents: read`. Four jobs raise it to
 `contents: write`: `create-release`, `build`, `audit` and `publish`.
 
-`audit` is the surprising one, because it only reads. A draft release is
+`audit` is the surprising one because it only reads. A draft release is
 visible only to a token with push access, so with `contents: read` the API
-answers "release not found" for a draft that plainly exists, and the audit
-fails having checked nothing. Run 34208473988 lost a release to this: both
+reports a draft that plainly exists as not found, and the audit fails having
+checked nothing. Run 34208473988 lost a release to this: both
 build legs succeeded and uploaded all twelve assets, and the audit could not
 see the draft holding them.
 
