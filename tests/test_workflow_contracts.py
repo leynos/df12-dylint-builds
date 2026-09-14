@@ -277,15 +277,26 @@ def test_the_audit_rechecks_every_sidecar_after_upload(
 ) -> None:
     """The published assets are downloaded again and re-verified as a set.
 
-    Mutation: dropping ``--dist audit-dist`` from the audit command failed
+    The two steps have to name the same directory, or the audit verifies
+    a directory nobody filled and passes over nothing.
+
+    Mutation: dropping ``--dist audit-dist`` from the audit command, and
+    separately pointing the download at another directory, each failed
     this contract.
     """
     audits = steps_running(release, "audit", "scripts/package.py verify")
-    assert len(audits) == 1, audits
-    assert "--dist audit-dist" in audits[0]
-    downloads = steps_running(release, "audit", "gh release download")
-    assert downloads and "for attempt in 1 2 3" in downloads[0], (
-        "asset downloads must be retried"
+    assert len(audits) == 1, (
+        f"the audit verifies in exactly one step; found {len(audits)}"
+    )
+    assert "--dist audit-dist" in audits[0], (
+        f"the audit must verify the directory it downloaded into: {audits[0]}"
+    )
+    downloads = steps_running(release, "audit", "scripts/audit_draft.py")
+    assert len(downloads) == 1, (
+        f"the audit reads the draft in exactly one step; found {len(downloads)}"
+    )
+    assert "--dir audit-dist" in downloads[0], (
+        f"the download must fill the directory the verification reads: {downloads[0]}"
     )
 
 
@@ -458,6 +469,47 @@ def test_the_audit_can_see_the_draft_it_audits(release: dict[str, Any]) -> None:
     )
 
 
+def test_the_audits_download_is_one_command_rather_than_a_shell_loop(
+    release: dict[str, Any],
+) -> None:
+    """The step that reads the draft invokes a script and nothing else.
+
+    It used to be a `for` loop with a conditional and a `sleep`, written
+    inline in the `run` block, and that shape is why none of the audit's
+    decisions had a test: the retry, the treatment of a permanent status
+    and the refusal to write a truncated body were all buried in shell
+    that only a release could execute. They live in
+    `scripts/audit_draft.py` now, with `tests/test_audit_draft.py`
+    driving each of them against a local server.
+
+    This contract is what stops the loop coming back. It matches shell
+    control flow rather than the absence of a script name, because a
+    step can invoke the script and still grow a loop around it.
+
+    Mutation: restoring the `for attempt in 1 2 3` loop failed this
+    contract.
+    """
+    downloads = [
+        step
+        for step in steps_of(release, "audit")
+        if "scripts/audit_draft.py" in step.get("run", "")
+    ]
+    assert len(downloads) == 1, (
+        f"the audit reads the draft in exactly one step; found {len(downloads)}"
+    )
+    body = downloads[0]["run"]
+    control_flow = [
+        token
+        for token in ("for ", "while ", "if ", "&&", "||", ";", "sleep ")
+        if token in body
+    ]
+    assert not control_flow, (
+        "the step that reads the draft must be one command, so that its "
+        "decisions live where a test can drive them; found shell control "
+        f"flow {control_flow} in: {body}"
+    )
+
+
 def test_the_audits_download_is_given_the_token_the_grant_provides(
     release: dict[str, Any],
 ) -> None:
@@ -479,7 +531,7 @@ def test_the_audits_download_is_given_the_token_the_grant_provides(
     downloads = [
         step
         for step in steps_of(release, "audit")
-        if "gh release download" in step.get("run", "")
+        if "scripts/audit_draft.py" in step.get("run", "")
     ]
     assert len(downloads) == 1, (
         f"the audit reads the draft in exactly one step; found {len(downloads)}"

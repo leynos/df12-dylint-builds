@@ -39,6 +39,7 @@ consecutive blank lines.
 | `scripts/matrix.py`          | Prints the build matrix, the pinned facts and validates a tag          |
 | `scripts/package.py`         | Packages, verifies and audits archives and sidecars                    |
 | `scripts/verify_upstream.py` | Downloads upstream's archives and checks them the same way             |
+| `scripts/audit_draft.py`     | Reads a draft release's assets back from GitHub for the audit          |
 | `tests/`                     | Unit tests, property tests and the workflow contracts                  |
 
 ## Errors
@@ -166,6 +167,38 @@ A contract asserts the audit job's permission for that reason, and a second
 asserts that the set of jobs holding write is exactly those four, so the
 grant cannot spread to `prepare` or `verify-upstream`, neither of which
 touches the release.
+
+The grant is necessary and not sufficient. `gh` and this repository's own
+reader both take their credentials from the environment, so a job holding
+`contents: write` whose download step is handed no `GH_TOKEN` fails exactly as
+the unprivileged run did. A third contract therefore asserts that the step
+reading the draft carries `GH_TOKEN` and `GH_REPO`, and it is proved by
+deleting each from that step rather than from the first one in the file.
+
+### Reading the draft back
+
+`scripts/audit_draft.py` performs the read. It looks the release up by tag,
+then downloads each asset with the token, reusing `verify_upstream.download`
+so the retry, the backoff and the refusal to write a truncated body are the
+same code in both places.
+
+It replaced a `for` loop with a conditional and a `sleep`, written inline in
+the workflow's `run` block, and the reason is not tidiness. Every decision in
+that step was one only a release could execute: whether a status is worth
+another attempt, what a 403 means as against a 503, whether a short body may
+be written out, and what an empty release means. `tests/test_audit_draft.py`
+drives each against a local server standing in for the API, including the 404
+that a draft returns to a token without push access, which is the failure the
+permission change exists to prevent. A contract keeps the step to a single
+command, so the loop cannot come back.
+
+Two of its decisions are worth stating outright. A 404 is reported as the
+under-privileged-token case, because the API answers the same way for a
+release that does not exist and for a draft the token cannot see, and only one
+of those has ever happened here. A release carrying no assets is a failure
+rather than a clean result: an audit over an empty directory passes every
+check it is given, which is indistinguishable from success and is the outcome
+the audit exists to prevent.
 
 ### When a release fails
 

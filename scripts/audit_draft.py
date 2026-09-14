@@ -1,0 +1,345 @@
+"""Download every asset of a draft release, so the audit can check them.
+
+The audit exists to read back what the build legs uploaded, from GitHub,
+rather than trusting the artefacts still on the runner. A draft release
+is visible only to a token with push access: without one the API reports
+it as not found, and the audit would pass judgement on an empty
+directory. Run 34208473988 lost a release to exactly that, with both
+build legs having uploaded all twelve assets.
+
+So this reads the release by tag and every asset under it, with the
+token, retrying transient failures and refusing to write a truncated
+body. It replaces a shell loop in the workflow, which no test could
+drive: the retry, the treatment of a permanent status, and the
+distinction between an empty release and an unreadable one are decisions
+rather than plumbing, and they belong somewhere they can be exercised.
+
+Nothing is verified here. `package.py verify` is the next step and owns
+the sidecars and the layout.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Final
+
+from package import PackagingError
+from verify_upstream import (
+    DEFAULT_RETRY,
+    TIMEOUT_SECONDS,
+    USER_AGENT,
+    Retry,
+    download,
+)
+
+DEFAULT_API: Final = "https://api.github.com"
+#: The API version this script's response handling was written against.
+API_VERSION: Final = "2022-11-28"
+
+
+def _headers(token: str, *, accept: str) -> dict[str, str]:
+    """Return the request headers for one authenticated API read.
+
+    Parameters
+    ----------
+    token:
+        A GitHub token with push access, which is what makes a draft
+        release visible at all.
+    accept:
+        The media type to ask for. Asset bodies need
+        ``application/octet-stream``; anything else returns the asset's
+        metadata again, which would be written out as though it were an
+        archive.
+
+    Returns
+    -------
+    dict[str, str]
+        The headers.
+    """
+    return {
+        "Accept": accept,
+        "Authorization": f"Bearer {token}",
+        "User-Agent": USER_AGENT,
+        "X-GitHub-Api-Version": API_VERSION,
+    }
+
+
+def _read_json(url: str, token: str, *, subject: str) -> object:
+    """Read one JSON document from the API, or say why it could not be.
+
+    The error translation lives here rather than in the caller so that
+    each reason is stated once. A 404 gets the longest explanation
+    because the API answers the same way for a release that does not
+    exist and for a draft the token cannot see, and only the second has
+    ever happened here.
+
+    Parameters
+    ----------
+    url:
+        The address to read.
+    token:
+        A GitHub token with push access.
+    subject:
+        What is being read, for the failure messages.
+
+    Returns
+    -------
+    object
+        The decoded body.
+
+    Raises
+    ------
+    PackagingError
+        If the read fails, or the body is not JSON.
+    """
+    request = urllib.request.Request(
+        url, headers=_headers(token, accept="application/vnd.github+json")
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        raise PackagingError(_http_reason(subject, error.code)) from error
+    except (urllib.error.URLError, OSError) as error:
+        message = f"{subject}: could not be read: {error}"
+        raise PackagingError(message) from error
+    except json.JSONDecodeError as error:
+        message = f"{subject}: returned a body that is not JSON"
+        raise PackagingError(message) from error
+
+
+def _http_reason(subject: str, code: int) -> str:
+    """Return the failure message for one HTTP status.
+
+    Parameters
+    ----------
+    subject:
+        What was being read.
+    code:
+        The status the API returned.
+
+    Returns
+    -------
+    str
+        The message.
+    """
+    if code == 404:
+        return (
+            f"{subject}: not found. A draft release is visible only to a "
+            f"token with push access, so this is also what an "
+            f"under-privileged token sees for a draft that exists."
+        )
+    return f"{subject}: returned HTTP {code}"
+
+
+def release_for_tag(repo: str, tag: str, token: str, *, api: str = DEFAULT_API) -> dict:
+    """Return the release GitHub holds for ``tag``.
+
+    Parameters
+    ----------
+    repo:
+        The repository in ``owner/name`` form.
+    tag:
+        The release tag.
+    token:
+        A GitHub token with push access.
+    api:
+        The API root, so a test can point this at a local server.
+
+    Returns
+    -------
+    dict
+        The release object.
+
+    Raises
+    ------
+    PackagingError
+        If the release cannot be read, or the body is not an object.
+    """
+    owner_repo = urllib.parse.quote(repo)
+    quoted_tag = urllib.parse.quote(tag)
+    subject = f"{repo} release {tag}"
+    payload = _read_json(
+        f"{api}/repos/{owner_repo}/releases/tags/{quoted_tag}", token, subject=subject
+    )
+    if not isinstance(payload, dict):
+        message = f"{subject}: returned {type(payload).__name__}, not a release"
+        raise PackagingError(message)
+    return payload
+
+
+def assets_of(release: dict) -> list[dict]:
+    """Return the release's assets, insisting there is at least one.
+
+    Parameters
+    ----------
+    release:
+        The release object.
+
+    Returns
+    -------
+    list[dict]
+        The assets, each with a ``name`` and a ``url``.
+
+    Raises
+    ------
+    PackagingError
+        If the assets are missing, not a list, or empty. An empty draft
+        is reported rather than accepted: the audit's whole purpose is
+        to read back what was uploaded, and finding nothing is the
+        result it must never treat as a clean sheet.
+    """
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        message = "the release carries no asset list, so nothing can be audited"
+        raise PackagingError(message)
+    if not assets:
+        message = (
+            "the release carries no assets. An audit over an empty directory "
+            "passes every check it is given, so this is a failure rather than "
+            "a clean result"
+        )
+        raise PackagingError(message)
+    return assets
+
+
+def _required_text(asset: dict, field: str) -> str:
+    """Return one string field of an asset, insisting it is present.
+
+    Parameters
+    ----------
+    asset:
+        The asset object.
+    field:
+        The field to read.
+
+    Returns
+    -------
+    str
+        The value.
+
+    Raises
+    ------
+    PackagingError
+        If the field is absent, empty, or not a string.
+    """
+    value = asset.get(field)
+    if not isinstance(value, str) or not value:
+        message = f"an asset of this release has no {field}: {asset!r}"
+        raise PackagingError(message)
+    return value
+
+
+def _asset_target(asset: dict, destination: Path) -> tuple[str, Path]:
+    """Return one asset's download URL and where it may be written.
+
+    The name comes from the release rather than from this repository, so
+    it is not trusted to stay inside the directory.
+
+    Parameters
+    ----------
+    asset:
+        The asset object.
+    destination:
+        The directory being filled.
+
+    Returns
+    -------
+    tuple[str, Path]
+        The URL to read, and the path to write.
+
+    Raises
+    ------
+    PackagingError
+        If the asset lacks a name or a URL, or the name would escape.
+    """
+    name = _required_text(asset, "name")
+    url = _required_text(asset, "url")
+    target = (destination / name).resolve()
+    if not target.is_relative_to(destination.resolve()):
+        message = f"asset name {name!r} would write outside {destination}"
+        raise PackagingError(message)
+    return url, target
+
+
+def download_assets(
+    release: dict,
+    destination: Path,
+    token: str,
+    *,
+    retry: Retry = DEFAULT_RETRY,
+) -> list[Path]:
+    """Download every asset of ``release`` into ``destination``.
+
+    Parameters
+    ----------
+    release:
+        The release object.
+    destination:
+        The directory to write into. Created if absent.
+    token:
+        A GitHub token with push access.
+    retry:
+        How hard to try each asset.
+
+    Returns
+    -------
+    list[Path]
+        The written files, in the order the release lists them.
+
+    Raises
+    ------
+    PackagingError
+        If an asset is unusable, or a download fails.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    headers = _headers(token, accept="application/octet-stream")
+    written: list[Path] = []
+    for asset in assets_of(release):
+        url, target = _asset_target(asset, destination)
+        download(url, target, retry=retry, headers=headers)
+        written.append(target)
+    return written
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Download a draft release's assets for the audit step.
+
+    Parameters
+    ----------
+    argv:
+        Command-line arguments, or None to read ``sys.argv``.
+
+    Returns
+    -------
+    int
+        ``0`` on success, ``1`` when the release or an asset could not
+        be read.
+    """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", required=True, help="owner/name")
+    parser.add_argument("--tag", required=True, help="the release tag")
+    parser.add_argument("--token", required=True, help="a token with push access")
+    parser.add_argument("--dir", required=True, type=Path, help="where to write")
+    parser.add_argument("--api", default=DEFAULT_API, help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+
+    try:
+        release = release_for_tag(args.repo, args.tag, args.token, api=args.api)
+        written = download_assets(release, args.dir, args.token)
+    except PackagingError as error:
+        print(f"::error::{error}", file=sys.stderr)
+        return 1
+    print(f"downloaded {len(written)} asset(s) for {args.tag} into {args.dir}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

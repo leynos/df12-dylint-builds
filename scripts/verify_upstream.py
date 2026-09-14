@@ -11,10 +11,12 @@ import argparse
 import http.client
 import sys
 import time
+import typing
 import urllib.error
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 
 from dylint_config import Config, ConfigError, default_config_path, load_config
@@ -24,17 +26,42 @@ ATTEMPTS: Final = 4
 BACKOFF_SECONDS: Final = 5
 TIMEOUT_SECONDS: Final = 120
 USER_AGENT: Final = "df12-dylint-builds"
+#: The default extra headers: none. A shared immutable mapping rather
+#: than None, so the merge below needs no branch of its own.
+NO_HEADERS: Final[Mapping[str, str]] = MappingProxyType({})
 # Statuses worth another attempt. Anything else is the server saying no,
 # and asking again four times only delays the failure.
 RETRYABLE_STATUSES: Final = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+
+class Retry(typing.NamedTuple):
+    """How hard to try a download before giving up.
+
+    One value rather than two parameters, because the pair describes a
+    single policy and a call naming one of them by keyword read as
+    though the other had been forgotten.
+
+    Attributes
+    ----------
+    attempts:
+        How many times to try.
+    backoff:
+        Seconds to wait after the first failure, scaled by attempt.
+    """
+
+    attempts: int = ATTEMPTS
+    backoff: float = BACKOFF_SECONDS
+
+
+DEFAULT_RETRY: Final = Retry()
 
 
 def download(
     url: str,
     destination: Path,
     *,
-    attempts: int = ATTEMPTS,
-    backoff: float = BACKOFF_SECONDS,
+    retry: Retry = DEFAULT_RETRY,
+    headers: Mapping[str, str] = NO_HEADERS,
 ) -> Path:
     """Download ``url`` to ``destination``, retrying transient failures.
 
@@ -46,10 +73,13 @@ def download(
         Where to write the response body. Nothing is written unless the whole
         body arrives, so a truncated response cannot be mistaken for an
         archive.
-    attempts:
-        How many times to try before giving up.
-    backoff:
-        Seconds to wait after the first failure, scaled by the attempt number.
+    retry:
+        How many times to try, and how long to wait between attempts.
+    headers:
+        Extra request headers, merged over the default user agent. This is
+        how an authenticated read passes its token, so that a draft release,
+        which is invisible without push access, can be fetched by the same
+        retrying reader as a public archive.
 
     Returns
     -------
@@ -63,10 +93,11 @@ def download(
         every attempt fails, or if the body arrives but ``destination``
         cannot be written.
     """
+    request_headers = {"User-Agent": USER_AGENT, **headers}
     last: Exception | None = None
-    for attempt in range(1, attempts + 1):
+    for attempt in range(1, retry.attempts + 1):
         try:
-            request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            request = urllib.request.Request(url, headers=request_headers)
             with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
                 payload = response.read()
         except urllib.error.HTTPError as error:
@@ -89,11 +120,12 @@ def download(
                     f"could not write {destination}: {error}"
                 ) from error
             return destination
-        if attempt == attempts:
+        if attempt == retry.attempts:
             break
         print(f"attempt {attempt} for {url} failed: {last}; retrying")
-        time.sleep(backoff * attempt)
-    raise PackagingError(f"could not download {url} after {attempts} attempts: {last}")
+        time.sleep(retry.backoff * attempt)
+    message = f"could not download {url} after {retry.attempts} attempts: {last}"
+    raise PackagingError(message)
 
 
 def verify_upstream(config: Config, work: Path) -> list[str]:

@@ -14,7 +14,7 @@ import pytest
 from conftest import FIXTURE_COMMIT, FIXTURE_CONFIG, write_stubs
 from dylint_config import parse_config
 from package import PackagingError, pack, write_sidecar
-from verify_upstream import download, main, verify_upstream
+from verify_upstream import Retry, download, main, verify_upstream
 
 UPSTREAM_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")
 
@@ -192,7 +192,7 @@ def test_a_download_that_cannot_be_written_names_the_destination(
     (root / "probe.txt").write_bytes(b"probe")
     destination = tmp_path / "absent-directory" / "probe.txt"
     with pytest.raises(PackagingError, match="could not write"):
-        download(f"{base_url}/v6.0.4/probe.txt", destination, backoff=0)
+        download(f"{base_url}/v6.0.4/probe.txt", destination, retry=Retry(backoff=0))
 
 
 def test_a_download_is_retried_before_it_fails(
@@ -200,7 +200,11 @@ def test_a_download_is_retried_before_it_fails(
 ) -> None:
     """Transient network failures are retried, and the last error is reported."""
     with pytest.raises(PackagingError, match="after 2 attempts"):
-        download("http://127.0.0.1:1/absent", tmp_path / "out", attempts=2, backoff=0)
+        download(
+            "http://127.0.0.1:1/absent",
+            tmp_path / "out",
+            retry=Retry(attempts=2, backoff=0),
+        )
     assert "attempt 1" in capsys.readouterr().out
 
 
@@ -236,7 +240,9 @@ def test_a_permanent_status_is_not_retried(
     """A 404 will not become a 200, so it fails at once and says so."""
     base_url, _ = upstream_server
     with pytest.raises(PackagingError, match="HTTP 404"):
-        download(f"{base_url}/v6.0.4/absent.tar.gz", tmp_path / "out", backoff=0)
+        download(
+            f"{base_url}/v6.0.4/absent.tar.gz", tmp_path / "out", retry=Retry(backoff=0)
+        )
     assert "retrying" not in capsys.readouterr().out, (
         "a status that will not change must fail without a retry"
     )
@@ -248,7 +254,11 @@ def test_a_truncated_response_is_retried_and_never_written(
     """A body shorter than its Content-Length is a failure, not a short archive."""
     destination = tmp_path / "out"
     with pytest.raises(PackagingError, match="after 2 attempts"):
-        download(f"{truncating_server}/anything", destination, attempts=2, backoff=0)
+        download(
+            f"{truncating_server}/anything",
+            destination,
+            retry=Retry(attempts=2, backoff=0),
+        )
     assert not destination.exists(), "a truncated body must not be written out"
 
 
@@ -276,7 +286,9 @@ def test_a_retryable_status_is_retried_and_then_succeeds(
     ``RETRYABLE_STATUSES`` test, passes every other download test. Only this
     one distinguishes a status worth retrying from one that is not.
     """
-    destination = download(f"{flaky_server}/asset.tar.gz", tmp_path / "out", backoff=0)
+    destination = download(
+        f"{flaky_server}/asset.tar.gz", tmp_path / "out", retry=Retry(backoff=0)
+    )
     assert destination.read_bytes() == _FlakyHandler.payload, (
         "the retry must write the body of the attempt that succeeded"
     )
