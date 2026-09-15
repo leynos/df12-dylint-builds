@@ -19,13 +19,43 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from audit_draft import Retry, assets_of, download_assets, main, release_for_tag
+from audit_draft import (
+    Api,
+    ReleasePayload,
+    Retry,
+    assets_of,
+    download_assets,
+    main,
+    release_for_tag,
+)
 from package import PackagingError
 
 TOKEN = "test-token"
 REPO = "leynos/df12-dylint-builds"
 TAG = "v6.0.4"
 ASSET = b"the archive bytes"
+
+
+def _api(root: str, *, attempts: int = 4) -> Api:
+    """Return an `Api` pointed at the stand-in server, with no backoff.
+
+    A real backoff would make every retry test wait out the policy the
+    release uses, so the tests set it to zero and vary only the attempt
+    count.
+
+    Parameters
+    ----------
+    root:
+        The stand-in API's root.
+    attempts:
+        How many times a read may be tried.
+
+    Returns
+    -------
+    Api
+        The client configuration.
+    """
+    return Api(token=TOKEN, root=root, retry=Retry(attempts=attempts, backoff=0))
 
 
 class _ApiHandler(http.server.BaseHTTPRequestHandler):
@@ -39,11 +69,19 @@ class _ApiHandler(http.server.BaseHTTPRequestHandler):
     #: Status to answer the release lookup with, or None for the release.
     release_status: typing.ClassVar[int | None] = None
     #: The release body to serve.
-    release: typing.ClassVar[dict] = {}
+    release: typing.ClassVar[ReleasePayload] = {}
     #: Paths already asked for, so a flaky answer can succeed on retry.
     seen: typing.ClassVar[set[str]] = set()
     #: How the asset endpoint should behave.
     asset_mode: typing.ClassVar[str] = "ok"
+    #: Release paths already asked for, so the lookup can be flaky too.
+    release_seen: typing.ClassVar[set[str]] = set()
+    #: Status to answer the first release lookup with, then serve the
+    #: release. `None` leaves `release_status` in charge.
+    release_first_status: typing.ClassVar[int | None] = None
+    #: Every release path asked for, in order, so a test can read back
+    #: the URL the script built.
+    release_paths: typing.ClassVar[list[str]] = []
 
     def do_GET(self) -> None:
         """Serve the release lookup or an asset body."""
@@ -54,6 +92,11 @@ class _ApiHandler(http.server.BaseHTTPRequestHandler):
 
     def _serve_release(self) -> None:
         """Answer the release-by-tag lookup."""
+        self.release_paths.append(self.path)
+        if self.release_first_status is not None and self.path not in self.release_seen:
+            self.release_seen.add(self.path)
+            self.send_error(self.release_first_status, "not yet")
+            return
         if self.release_status is not None:
             self.send_error(self.release_status, "no")
             return
@@ -94,6 +137,9 @@ def api() -> Iterator[str]:
     _ApiHandler.release = {}
     _ApiHandler.seen = set()
     _ApiHandler.asset_mode = "ok"
+    _ApiHandler.release_seen = set()
+    _ApiHandler.release_first_status = None
+    _ApiHandler.release_paths = []
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ApiHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -105,7 +151,7 @@ def api() -> Iterator[str]:
         thread.join(timeout=5)
 
 
-def _release(root: str, *names: str) -> dict:
+def _release(root: str, *names: str) -> ReleasePayload:
     """Return a release body naming assets served by this API.
 
     Parameters
@@ -117,7 +163,7 @@ def _release(root: str, *names: str) -> dict:
 
     Returns
     -------
-    dict
+    ReleasePayload
         The release body.
     """
     return {
@@ -137,7 +183,7 @@ class TestReadingTheRelease:
         """A readable draft comes back as the release object."""
         _ApiHandler.release = _release(api, "a.tar.gz")
 
-        release = release_for_tag(REPO, TAG, TOKEN, api=api)
+        release = release_for_tag(REPO, TAG, _api(api))
 
         assert release["tag_name"] == TAG, "the release must come back intact"
 
@@ -152,14 +198,80 @@ class TestReadingTheRelease:
         _ApiHandler.release_status = 404
 
         with pytest.raises(PackagingError, match="push access"):
-            release_for_tag(REPO, TAG, TOKEN, api=api)
+            release_for_tag(REPO, TAG, _api(api))
 
-    def test_another_status_is_reported_with_its_code(self, api: str) -> None:
-        """A non-404 failure names the status rather than guessing."""
+    def test_a_retryable_status_is_retried_and_then_succeeds(self, api: str) -> None:
+        """A 500 on the first lookup does not fail the release.
+
+        Before the retry a single transient status failed the audit
+        outright, and the asset retry never ran, because there was no
+        release to take assets from.
+        """
+        _ApiHandler.release_first_status = 500
+        _ApiHandler.release = _release(api, "a.tar.gz")
+
+        release = release_for_tag(REPO, TAG, _api(api))
+
+        assert release["tag_name"] == TAG, "the second attempt must be believed"
+
+    def test_a_404_on_the_first_lookup_is_retried(self, api: str) -> None:
+        """A 404 is retried, because the draft is created just before.
+
+        The workflow creates the release in `prepare` and reads it in
+        `audit`, so the first read can precede GitHub's own consistency.
+        A permanently invisible draft still fails, one backoff later.
+        """
+        _ApiHandler.release_first_status = 404
+        _ApiHandler.release = _release(api, "a.tar.gz")
+
+        release = release_for_tag(REPO, TAG, _api(api))
+
+        assert release["tag_name"] == TAG, "a 404 that clears must not fail the run"
+
+    def test_a_permanent_status_is_not_retried(self, api: str) -> None:
+        """A 403 fails at once and names its code.
+
+        Asking a permission answer again cannot change it, so retrying
+        only delays the failure by the whole backoff.
+        """
+        _ApiHandler.release_status = 403
+
+        with pytest.raises(PackagingError, match="HTTP 403"):
+            release_for_tag(REPO, TAG, _api(api))
+
+        assert len(_ApiHandler.release_paths) == 1, (
+            "a permanent status must be read once, not once per attempt; "
+            f"read {_ApiHandler.release_paths}"
+        )
+
+    def test_a_status_that_never_clears_reports_the_attempts(self, api: str) -> None:
+        """An exhausted retry says how many times it tried.
+
+        A failure that took four attempts and one that took one read
+        identically otherwise, and the difference is what tells a
+        maintainer whether the API was unwell or the token was wrong.
+        """
         _ApiHandler.release_status = 500
 
-        with pytest.raises(PackagingError, match="HTTP 500"):
-            release_for_tag(REPO, TAG, TOKEN, api=api)
+        with pytest.raises(PackagingError, match="after 2 attempts"):
+            release_for_tag(REPO, TAG, _api(api, attempts=2))
+
+    def test_a_tag_with_a_slash_stays_one_path_segment(self, api: str) -> None:
+        """A `/` in the tag is encoded rather than splitting the path.
+
+        `urllib.parse.quote` keeps `/` by default, so `release/6.0`
+        would address `releases/tags/release/6.0` and come back as a
+        not-found, which reads here as the under-privileged-token case
+        it is not.
+        """
+        _ApiHandler.release = _release(api, "a.tar.gz")
+
+        release_for_tag(REPO, "release/6.0", _api(api))
+
+        assert _ApiHandler.release_paths[0].endswith("/releases/tags/release%2F6.0"), (
+            "the tag must be one encoded path segment; got "
+            f"{_ApiHandler.release_paths[0]}"
+        )
 
 
 class TestTheAssetList:
@@ -180,6 +292,16 @@ class TestTheAssetList:
         with pytest.raises(PackagingError, match="no asset list"):
             assets_of({})
 
+    def test_an_entry_that_is_not_an_object_is_refused(self) -> None:
+        """A non-object entry fails here rather than at the field read.
+
+        Left to `_required_text` it raises an AttributeError, which
+        names neither the release nor the entry, and reads as a fault in
+        this script rather than in what the API returned.
+        """
+        with pytest.raises(PackagingError, match="where an asset object belongs"):
+            assets_of({"assets": ["a.tar.gz"]})
+
 
 class TestDownloadingTheAssets:
     """What the retry is worth, and what it is not."""
@@ -188,9 +310,7 @@ class TestDownloadingTheAssets:
         """Each named asset arrives in the destination directory."""
         _ApiHandler.release = _release(api, "a.tar.gz", "a.tar.gz.sha256")
 
-        written = download_assets(
-            _ApiHandler.release, tmp_path / "dist", TOKEN, retry=Retry(backoff=0)
-        )
+        written = download_assets(_ApiHandler.release, tmp_path / "dist", _api(api))
 
         assert [path.name for path in written] == ["a.tar.gz", "a.tar.gz.sha256"], (
             "every asset the release lists must be written, in its order"
@@ -208,9 +328,7 @@ class TestDownloadingTheAssets:
         _ApiHandler.asset_mode = "flaky"
         _ApiHandler.release = _release(api, "a.tar.gz")
 
-        written = download_assets(
-            _ApiHandler.release, tmp_path / "dist", TOKEN, retry=Retry(backoff=0)
-        )
+        written = download_assets(_ApiHandler.release, tmp_path / "dist", _api(api))
 
         assert written[0].read_bytes() == ASSET, "the retry must serve the real bytes"
 
@@ -224,9 +342,7 @@ class TestDownloadingTheAssets:
         _ApiHandler.release = _release(api, "a.tar.gz")
 
         with pytest.raises(PackagingError, match="HTTP 403"):
-            download_assets(
-                _ApiHandler.release, tmp_path / "dist", TOKEN, retry=Retry(backoff=0)
-            )
+            download_assets(_ApiHandler.release, tmp_path / "dist", _api(api))
 
     def test_a_truncated_body_is_never_written(self, api: str, tmp_path: Path) -> None:
         """A short body fails rather than landing as an archive.
@@ -239,10 +355,7 @@ class TestDownloadingTheAssets:
 
         with pytest.raises(PackagingError, match="attempts"):
             download_assets(
-                _ApiHandler.release,
-                tmp_path / "dist",
-                TOKEN,
-                retry=Retry(attempts=2, backoff=0),
+                _ApiHandler.release, tmp_path / "dist", _api(api, attempts=2)
             )
         assert not (tmp_path / "dist" / "a.tar.gz").exists(), (
             "nothing may be written unless the whole body arrived"
@@ -257,9 +370,7 @@ class TestDownloadingTheAssets:
         _ApiHandler.release = _release(api, "../escaped.tar.gz")
 
         with pytest.raises(PackagingError, match="outside"):
-            download_assets(
-                _ApiHandler.release, tmp_path / "dist", TOKEN, retry=Retry(backoff=0)
-            )
+            download_assets(_ApiHandler.release, tmp_path / "dist", _api(api))
 
 
 class TestTheCommandLine:
@@ -281,6 +392,8 @@ class TestTheCommandLine:
                 str(tmp_path / "dist"),
                 "--api",
                 api,
+                "--retry-backoff",
+                "0",
             ]
         )
 
@@ -305,6 +418,8 @@ class TestTheCommandLine:
                 str(tmp_path / "dist"),
                 "--api",
                 api,
+                "--retry-backoff",
+                "0",
             ]
         )
 

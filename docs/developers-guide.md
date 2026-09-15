@@ -180,7 +180,9 @@ deleting each from that step rather than from the first one in the file.
 `scripts/audit_draft.py` performs the read. It looks the release up by tag,
 then downloads each asset with the token, reusing `verify_upstream.download`
 so the retry, the backoff and the refusal to write a truncated body are the
-same code in both places.
+same code in both places. The lookup retries too, on the same statuses and on
+404: a single 500 from the API otherwise failed the release outright, and the
+asset retry never ran, because there was no release to take assets from.
 
 It replaced a `for` loop with a conditional and a `sleep`, written inline in
 the workflow's `run` block, and the reason is not tidiness. Every decision in
@@ -192,13 +194,16 @@ that a draft returns to a token without push access, which is the failure the
 permission change exists to prevent. A contract keeps the step to a single
 command, so the loop cannot come back.
 
-Two of its decisions are worth stating outright. A 404 is reported as the
-under-privileged-token case, because the API answers the same way for a
+Three of its decisions are worth stating outright. A 404 is reported as the
+under-privileged-token case because the API answers the same way for a
 release that does not exist and for a draft the token cannot see, and only one
-of those has ever happened here. A release carrying no assets is a failure
-rather than a clean result: an audit over an empty directory passes every
-check it is given, which is indistinguishable from success and is the outcome
-the audit exists to prevent.
+of those has ever happened here. It is nonetheless retried first: the workflow
+creates the draft in `prepare` and reads it in `audit`, so the first read can
+precede GitHub's own consistency, and an invisible draft still fails one
+backoff later. A release carrying no assets is a failure rather than a clean
+result: an audit over an empty directory passes every check it is given, which
+is indistinguishable from success and is the outcome the audit exists to
+prevent.
 
 ### When a release fails
 
