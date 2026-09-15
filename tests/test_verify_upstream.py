@@ -14,7 +14,7 @@ import pytest
 from conftest import FIXTURE_COMMIT, FIXTURE_CONFIG, write_stubs
 from dylint_config import parse_config
 from package import PackagingError, pack, write_sidecar
-from verify_upstream import Retry, download, main, verify_upstream
+from verify_upstream import USER_AGENT, Retry, download, main, verify_upstream
 
 UPSTREAM_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")
 
@@ -345,3 +345,90 @@ def test_the_command_line_reports_an_unreadable_configuration(
     assert "error: " in capsys.readouterr().err, (
         "a configuration failure must be reported on stderr"
     )
+
+
+class _HeaderRecordingHandler(http.server.BaseHTTPRequestHandler):
+    """Serve a fixed body and record the headers each request carried."""
+
+    #: Every request's headers, lower-cased, in order. Lower-cased
+    #: because `urllib` capitalises header names when it builds a
+    #: request, so a lookup by the documented spelling would miss.
+    seen: typing.ClassVar[list[dict[str, str]]] = []
+
+    def do_GET(self) -> None:
+        """Record the headers, then answer with the body."""
+        self.seen.append({k.lower(): v for k, v in self.headers.items()})
+        body = b"the bytes"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args: object) -> None:
+        """Discard the access log."""
+
+
+@pytest.fixture
+def header_server() -> Iterator[str]:
+    """Serve a body from a local server that records request headers."""
+    _HeaderRecordingHandler.seen = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _HeaderRecordingHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_supplied_headers_are_sent_alongside_the_default_user_agent(
+    header_server: str, tmp_path: Path
+) -> None:
+    """Extra headers are merged over the default, not substituted for it.
+
+    This is how the draft-release reader passes its token through the
+    same retrying downloader a public archive uses. Replacing the
+    header set rather than merging into it would drop the user agent
+    that GitHub attributes the reads to, and nothing else would notice.
+    """
+    download(
+        f"{header_server}/asset",
+        tmp_path / "asset",
+        retry=Retry(attempts=1, backoff=0),
+        headers={"Authorization": "Bearer a-token"},
+    )
+
+    sent = _HeaderRecordingHandler.seen[0]
+    assert sent.get("authorization") == "Bearer a-token", sent
+    assert sent.get("user-agent") == USER_AGENT, sent
+
+
+def test_a_supplied_user_agent_replaces_the_default(
+    header_server: str, tmp_path: Path
+) -> None:
+    """The merge is one-directional, so a caller can still override.
+
+    Asserted because the merge order is the whole content of the change
+    and both orders send the token; only this distinguishes them.
+    """
+    download(
+        f"{header_server}/asset",
+        tmp_path / "asset",
+        retry=Retry(attempts=1, backoff=0),
+        headers={"User-Agent": "something-else"},
+    )
+
+    assert _HeaderRecordingHandler.seen[0].get("user-agent") == "something-else"
+
+
+def test_a_download_with_no_headers_still_names_this_tool(
+    header_server: str, tmp_path: Path
+) -> None:
+    """The default survives the parameter being added."""
+    download(
+        f"{header_server}/asset", tmp_path / "asset", retry=Retry(attempts=1, backoff=0)
+    )
+
+    assert _HeaderRecordingHandler.seen[0].get("user-agent") == USER_AGENT
