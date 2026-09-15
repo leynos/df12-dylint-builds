@@ -65,6 +65,34 @@ class _TruncatingHandler(http.server.BaseHTTPRequestHandler):
         """Discard the access log."""
 
 
+def _serving(handler: type[http.server.BaseHTTPRequestHandler]) -> Iterator[str]:
+    """Serve ``handler`` on an ephemeral port and yield its base URL.
+
+    One shape for every stand-in server in this module. Each of the
+    three differs only in how it answers, and duplicating the start,
+    the shutdown and the join alongside that difference buried it.
+
+    Parameters
+    ----------
+    handler:
+        What answers each request.
+
+    Yields
+    ------
+    str
+        The server's base URL.
+    """
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def _serving_config(base_url: str) -> str:
     """Return a configuration whose upstream release URL points at a fixture."""
     return FIXTURE_CONFIG.replace(
@@ -221,15 +249,7 @@ def test_a_download_returns_the_destination(
 @pytest.fixture
 def truncating_server() -> Iterator[str]:
     """Serve responses whose bodies are shorter than their Content-Length."""
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _TruncatingHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    yield from _serving(_TruncatingHandler)
 
 
 def test_a_permanent_status_is_not_retried(
@@ -266,15 +286,7 @@ def test_a_truncated_response_is_retried_and_never_written(
 def flaky_server() -> Iterator[str]:
     """Serve one 503 per path before serving the real bytes."""
     _FlakyHandler.served = set()
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FlakyHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    yield from _serving(_FlakyHandler)
 
 
 def test_a_retryable_status_is_retried_and_then_succeeds(
@@ -372,15 +384,7 @@ class _HeaderRecordingHandler(http.server.BaseHTTPRequestHandler):
 def header_server() -> Iterator[str]:
     """Serve a body from a local server that records request headers."""
     _HeaderRecordingHandler.seen = []
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _HeaderRecordingHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_address[1]}"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
+    yield from _serving(_HeaderRecordingHandler)
 
 
 def test_supplied_headers_are_sent_alongside_the_default_user_agent(
