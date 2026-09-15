@@ -198,10 +198,11 @@ Three of its decisions are worth stating outright. A 404 is reported as the
 under-privileged-token case because the API answers the same way for a
 release that does not exist and for a draft the token cannot see, and only one
 of those has ever happened here. It is nonetheless retried first: the workflow
-creates the draft in `prepare` and reads it in `audit`, so the first read can
-precede GitHub's own consistency, and an invisible draft still fails one
-backoff later. A release carrying no assets is a failure rather than a clean
-result: an audit over an empty directory passes every check it is given, which
+creates the draft in `create-release` and reads it back in `audit`, so the
+first read can precede GitHub's own consistency. An invisible draft still
+fails, after four attempts and three sleeps of 5, 10 and 15 seconds. A release
+carrying no assets is a failure rather than a clean result: an audit over an
+empty directory passes every check it is given, which
 is indistinguishable from success and is the outcome the audit exists to
 prevent.
 

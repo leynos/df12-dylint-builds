@@ -165,12 +165,17 @@ def _headers(token: str, *, accept: str) -> dict[str, str]:
 
 
 #: Statuses the release lookup tries again on, over and above the ones
-#: any download retries. A release read immediately after the release was
-#: created can answer 404 before GitHub is consistent, and the workflow
-#: does exactly that: the draft is created in the `prepare` job and read
-#: in `audit`. Retrying it costs one backoff in the case that matters --
-#: an under-privileged token, which answers 404 every time -- and saves
-#: the whole release from a race that is invisible in the log.
+#: any download retries. A release read soon after it was created can
+#: answer 404 before GitHub is consistent, and the workflow does exactly
+#: that: `create-release` creates the draft, `build` uploads to it, and
+#: `audit` reads it back.
+#:
+#: Retrying 404 is not free. Under `DEFAULT_RETRY` an under-privileged
+#: token, which answers 404 every time, now fails after four attempts
+#: and three sleeps of 5, 10 and 15 seconds rather than at once. Thirty
+#: seconds on a release that was going to fail anyway buys a race that
+#: is otherwise invisible in the log, and the failure message is
+#: unchanged.
 LOOKUP_RETRYABLE_STATUSES: Final = RETRYABLE_STATUSES | {404}
 
 

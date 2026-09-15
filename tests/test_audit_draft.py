@@ -217,9 +217,10 @@ class TestReadingTheRelease:
     def test_a_404_on_the_first_lookup_is_retried(self, api: str) -> None:
         """A 404 is retried, because the draft is created just before.
 
-        The workflow creates the release in `prepare` and reads it in
-        `audit`, so the first read can precede GitHub's own consistency.
-        A permanently invisible draft still fails, one backoff later.
+        The workflow creates the release in `create-release` and reads
+        it back in `audit`, so the first read can precede GitHub's own
+        consistency. A permanently invisible draft still fails, after
+        the whole retry policy has been spent on it.
         """
         _ApiHandler.release_first_status = 404
         _ApiHandler.release = _release(api, "a.tar.gz")
