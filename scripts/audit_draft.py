@@ -21,6 +21,7 @@ the sidecars and the layout.
 from __future__ import annotations
 
 import argparse
+import enum
 import http.client
 import json
 import sys
@@ -29,7 +30,7 @@ import typing
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -58,14 +59,79 @@ DEFAULT_API: Final = "https://api.github.com"
 API_VERSION: Final = "2022-11-28"
 
 
+class JsonTransport(typing.Protocol):
+    """How a JSON read reaches the network.
+
+    Named so the reading can be handed over, rather than reached for.
+    A test supplies one that answers from a table, or one that refuses
+    to be called at all; the latter is what lets a query test state that
+    the path under it made no request.
+    """
+
+    def __call__(self, url: str, headers: Mapping[str, str]) -> bytes:
+        """Return the body at ``url``, or raise one of `READ_FAILURES`."""
+        ...
+
+
+class Clock(typing.Protocol):
+    """Where a duration comes from.
+
+    Injected so a latency bucket can be asserted rather than waited
+    for. It reads a monotonic counter, not a wall clock: the value is
+    only ever subtracted from another reading of itself.
+    """
+
+    def __call__(self) -> float:
+        """Return the current reading, in seconds."""
+        ...
+
+
+class Sleeper(typing.Protocol):
+    """How a retry waits.
+
+    Injected for the same reason as the transport: the waiting is a
+    decision this module makes, and a test that has to serve it out in
+    real seconds is a test nobody runs.
+    """
+
+    def __call__(self, seconds: float, /) -> None:
+        """Wait for ``seconds``."""
+        ...
+
+
+def urlopen_bytes(url: str, headers: Mapping[str, str]) -> bytes:
+    """Read ``url`` over HTTP and return the whole body.
+
+    The default transport. It is the only place in this module that
+    opens a socket, which is what makes the rest of it testable without
+    one.
+
+    Parameters
+    ----------
+    url:
+        The address to read.
+    headers:
+        The request headers, already carrying the token.
+
+    Returns
+    -------
+    bytes
+        The response body.
+    """
+    request = urllib.request.Request(url, headers=dict(headers))
+    with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+        return response.read()
+
+
 class Api(typing.NamedTuple):
     """How to reach the releases API: where, with what, and how hard.
 
-    One value rather than three parameters. The root exists so a test
-    can point this at a local server, and the retry so it need not wait
-    out a real backoff; both travel with the token on every call, and
-    passing them separately made each signature read as though the
-    others had been forgotten.
+    One value rather than six parameters. The root exists so a test
+    can point this at a local server, the retry so it need not wait out
+    a real backoff, and the transport and sleeper so a query can be
+    exercised with no network and no clock at all; all of them travel
+    with the token on every call, and passing them separately made each
+    signature read as though the others had been forgotten.
 
     Attributes
     ----------
@@ -76,11 +142,21 @@ class Api(typing.NamedTuple):
         The API root.
     retry:
         How many times to try a read, and how long to wait between.
+    transport:
+        What performs the read. Defaults to the real one.
+    sleeper:
+        What waits between attempts. Defaults to `time.sleep`.
+    clock:
+        Where a duration is read from, for the latency metric.
+        Defaults to `time.monotonic`.
     """
 
     token: str
     root: str = DEFAULT_API
     retry: Retry = DEFAULT_RETRY
+    transport: JsonTransport = urlopen_bytes
+    sleeper: Sleeper = time.sleep
+    clock: Clock = time.monotonic
 
 
 class _TransientError(Exception):
@@ -164,6 +240,119 @@ def _headers(token: str, *, accept: str) -> dict[str, str]:
     }
 
 
+class Outcome(enum.StrEnum):
+    """How one operation ended, in a vocabulary that cannot grow at runtime.
+
+    A metric label taken from a message, a status code or an exception
+    string is unbounded: every new failure mode becomes a new series,
+    and the count of the mode that matters is spread across all of them.
+    These are the categories the retry policy actually distinguishes,
+    and nothing else is ever reported.
+    """
+
+    OK = "ok"
+    RETRYABLE_STATUS = "retryable-status"
+    PERMANENT_STATUS = "permanent-status"
+    NOT_JSON = "not-json"
+    NOT_A_RELEASE = "not-a-release"
+    TRANSPORT_ERROR = "transport-error"
+
+
+#: The latency buckets a duration is reported in, as an upper bound and
+#: its label. A raw duration is an unbounded label, so it is placed in
+#: one of these instead; the boundaries are chosen around the retry
+#: policy, whose four attempts and 5, 10, 15 second waits put an
+#: exhausted lookup just past thirty seconds.
+LATENCY_BUCKETS: Final = (
+    (1.0, "under-1s"),
+    (5.0, "under-5s"),
+    (30.0, "under-30s"),
+    (120.0, "under-120s"),
+)
+#: What a duration past the last bucket is reported as.
+SLOWEST_BUCKET: Final = "over-120s"
+#: The prefix every metric line carries, so a workflow log can be read
+#: for them without matching the prose around them.
+METRIC_PREFIX: Final = "metric audit-draft."
+
+
+def latency_bucket(seconds: float) -> str:
+    """Return the bounded label ``seconds`` is reported under.
+
+    Parameters
+    ----------
+    seconds:
+        How long the operation took.
+
+    Returns
+    -------
+    str
+        One of the `LATENCY_BUCKETS` labels, or `SLOWEST_BUCKET`.
+
+    Examples
+    --------
+    >>> latency_bucket(0.2)
+    'under-1s'
+    >>> latency_bucket(45.0)
+    'under-120s'
+    >>> latency_bucket(600.0)
+    'over-120s'
+    """
+    for bound, label in LATENCY_BUCKETS:
+        if seconds < bound:
+            return label
+    return SLOWEST_BUCKET
+
+
+def report(name: str, value: object) -> None:
+    """Emit one metric line on stdout.
+
+    The workflow log is where these are read, which is the only place
+    this script has: it runs once per release and leaves nothing behind.
+    Callers pass a bounded value; nothing here makes one bounded, and
+    nothing here is given a token, a URL, an asset name or a payload.
+
+    Parameters
+    ----------
+    name:
+        The metric's name, under the `audit-draft` namespace.
+    value:
+        Its bounded value.
+    """
+    print(f"{METRIC_PREFIX}{name}={value}")
+
+
+def outcome_of(error: BaseException | None) -> Outcome:
+    """Return the bounded category one read failure belongs to.
+
+    Parameters
+    ----------
+    error:
+        What the attempt raised, or None if it succeeded.
+
+    Returns
+    -------
+    Outcome
+        The category.
+
+    Examples
+    --------
+    >>> outcome_of(None)
+    <Outcome.OK: 'ok'>
+    >>> outcome_of(TimeoutError("timed out"))
+    <Outcome.TRANSPORT_ERROR: 'transport-error'>
+    """
+    if error is None:
+        return Outcome.OK
+    if isinstance(error, urllib.error.HTTPError):
+        if error.code in LOOKUP_RETRYABLE_STATUSES:
+            return Outcome.RETRYABLE_STATUS
+        return Outcome.PERMANENT_STATUS
+    if isinstance(error, json.JSONDecodeError):
+        return Outcome.NOT_JSON
+    return Outcome.TRANSPORT_ERROR
+
+
 #: Statuses the release lookup tries again on, over and above the ones
 #: any download retries. A release read soon after it was created can
 #: answer 404 before GitHub is consistent, and the workflow does exactly
@@ -179,7 +368,13 @@ def _headers(token: str, *, accept: str) -> dict[str, str]:
 LOOKUP_RETRYABLE_STATUSES: Final = RETRYABLE_STATUSES | {404}
 
 
-def _read_json_once(url: str, headers: dict[str, str], *, subject: str) -> object:
+def _read_json_once(
+    url: str,
+    headers: Mapping[str, str],
+    *,
+    subject: str,
+    transport: JsonTransport,
+) -> object:
     """Read one JSON document, or raise the verdict on the failure.
 
     Parameters
@@ -190,6 +385,8 @@ def _read_json_once(url: str, headers: dict[str, str], *, subject: str) -> objec
         The request headers, already carrying the token.
     subject:
         What is being read, for the failure messages.
+    transport:
+        What performs the read.
 
     Returns
     -------
@@ -204,12 +401,31 @@ def _read_json_once(url: str, headers: dict[str, str], *, subject: str) -> objec
     _TransientError
         If another attempt might succeed.
     """
-    request = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-            return json.loads(response.read())
+        return json.loads(transport(url, headers))
     except READ_FAILURES as error:
         raise _verdict_on(subject, error) from error
+
+
+def _report_read(
+    started: float, attempts: int, cause: BaseException | None, api: Api
+) -> None:
+    """Report how one release lookup ended.
+
+    Parameters
+    ----------
+    started:
+        The clock reading taken before the first attempt.
+    attempts:
+        How many attempts were made.
+    cause:
+        What the last attempt raised, or None if it succeeded.
+    api:
+        How to reach the API; its clock is read for the duration.
+    """
+    report("release-lookup.outcome", outcome_of(cause))
+    report("release-lookup.attempts", attempts)
+    report("release-lookup.latency", latency_bucket(api.clock() - started))
 
 
 def _read_json(url: str, api: Api, *, subject: str) -> object:
@@ -241,17 +457,35 @@ def _read_json(url: str, api: Api, *, subject: str) -> object:
     """
     headers = _headers(api.token, accept="application/vnd.github+json")
     last = ""
-    for attempt in range(1, api.retry.attempts + 1):
-        try:
-            return _read_json_once(url, headers, subject=subject)
-        except _TransientError as transient:
-            last = str(transient)
-        if attempt == api.retry.attempts:
-            break
-        print(f"attempt {attempt} to read {subject} failed: {last}; retrying")
-        time.sleep(api.retry.backoff * attempt)
-    message = f"{last} (after {api.retry.attempts} attempts)"
-    raise PackagingError(message)
+    cause: BaseException | None = None
+    started = api.clock()
+    attempt = 0
+    try:
+        for attempt in range(1, api.retry.attempts + 1):
+            try:
+                payload = _read_json_once(
+                    url, headers, subject=subject, transport=api.transport
+                )
+            except _TransientError as transient:
+                last = str(transient)
+                cause = transient.__cause__
+            except PackagingError as permanent:
+                cause = permanent.__cause__
+                raise
+            else:
+                cause = None
+                return payload
+            if attempt == api.retry.attempts:
+                break
+            print(f"attempt {attempt} to read {subject} failed: {last}; retrying")
+            api.sleeper(api.retry.backoff * attempt)
+        message = f"{last} (after {api.retry.attempts} attempts)"
+        raise PackagingError(message)
+    finally:
+        # Reported from `finally` so the failing paths are counted too:
+        # a retry rate is only readable next to the failures it did not
+        # prevent, and those are exactly the runs that raise from here.
+        _report_read(started, attempt, cause, api)
 
 
 def _http_reason(subject: str, code: int) -> str:
@@ -278,8 +512,86 @@ def _http_reason(subject: str, code: int) -> str:
     return f"{subject}: returned HTTP {code}"
 
 
+def release_url(repo: str, tag: str, root: str = DEFAULT_API) -> str:
+    """Return the address of the release GitHub holds for ``tag``.
+
+    A pure function of its arguments: it opens nothing and reads
+    nothing. The quoting is the whole of its content, and the quoting
+    has been wrong before, so it is worth being able to state the answer
+    without a server in the way.
+
+    Parameters
+    ----------
+    repo:
+        The repository in ``owner/name`` form.
+    tag:
+        The release tag.
+    root:
+        The API root.
+
+    Returns
+    -------
+    str
+        The address of the release lookup.
+
+    Examples
+    --------
+    >>> release_url("leynos/df12-dylint-builds", "v1.0.0")
+    'https://api.github.com/repos/leynos/df12-dylint-builds/releases/tags/v1.0.0'
+    >>> release_url("leynos/df12-dylint-builds", "release/6.0").rsplit("/", 1)[-1]
+    'release%2F6.0'
+    """
+    owner_repo = urllib.parse.quote(repo)
+    # ``safe=""`` because a tag is one path segment. The default keeps
+    # ``/`` unencoded, so a tag such as ``release/6.0`` would address
+    # ``releases/tags/release/6.0`` and come back as a not-found, which
+    # reads here as the under-privileged-token case it is not.
+    quoted_tag = urllib.parse.quote(tag, safe="")
+    return f"{root}/repos/{owner_repo}/releases/tags/{quoted_tag}"
+
+
+def release_from_payload(payload: object, *, subject: str) -> ReleasePayload:
+    """Return ``payload`` as a release, or say what arrived instead.
+
+    Pure: this decides what a decoded body is, and nothing else. The
+    API answers a lookup with an array in at least one shape, and an
+    array reaching `assets_of` fails on the wrong thing.
+
+    Parameters
+    ----------
+    payload:
+        A decoded JSON body.
+    subject:
+        What was being read, for the failure message.
+
+    Returns
+    -------
+    ReleasePayload
+        The release object.
+
+    Raises
+    ------
+    PackagingError
+        If the body is not an object.
+
+    Examples
+    --------
+    >>> release_from_payload({"assets": []}, subject="a release")
+    {'assets': []}
+    """
+    if not isinstance(payload, dict):
+        message = f"{subject}: returned {type(payload).__name__}, not a release"
+        raise PackagingError(message)
+    return payload
+
+
 def release_for_tag(repo: str, tag: str, api: Api) -> ReleasePayload:
     """Return the release GitHub holds for ``tag``.
+
+    The fallible boundary: it is the composition of `release_url`, the
+    retrying read through `api.transport`, and `release_from_payload`.
+    Everything it decides is in one of those three; what it adds is the
+    network.
 
     Parameters
     ----------
@@ -300,22 +612,21 @@ def release_for_tag(repo: str, tag: str, api: Api) -> ReleasePayload:
     PackagingError
         If the release cannot be read, or the body is not an object.
     """
-    owner_repo = urllib.parse.quote(repo)
-    # ``safe=""`` because a tag is one path segment. The default keeps
-    # ``/`` unencoded, so a tag such as ``release/6.0`` would address
-    # ``releases/tags/release/6.0`` and come back as a not-found, which
-    # reads here as the under-privileged-token case it is not.
-    quoted_tag = urllib.parse.quote(tag, safe="")
     subject = f"{repo} release {tag}"
-    payload = _read_json(
-        f"{api.root}/repos/{owner_repo}/releases/tags/{quoted_tag}",
-        api,
-        subject=subject,
-    )
-    if not isinstance(payload, dict):
-        message = f"{subject}: returned {type(payload).__name__}, not a release"
-        raise PackagingError(message)
-    return payload
+    payload = _read_json(release_url(repo, tag, api.root), api, subject=subject)
+    # Reported separately from the lookup, and not from inside
+    # `release_from_payload`, which is pure. The lookup metric measures a
+    # retrying network operation; this measures the shape of what it
+    # brought back, which no retry would change, so folding the two into
+    # one outcome would put a permanent failure in a series read for
+    # transient ones.
+    outcome = Outcome.NOT_A_RELEASE
+    try:
+        release = release_from_payload(payload, subject=subject)
+        outcome = Outcome.OK
+    finally:
+        report("release-payload.outcome", outcome)
+    return release
 
 
 def assets_of(release: ReleasePayload) -> list[AssetPayload]:
@@ -391,11 +702,14 @@ def _required_text(asset: AssetPayload, field: str) -> str:
     return value
 
 
-def _asset_target(asset: AssetPayload, destination: Path) -> tuple[str, Path]:
+def asset_target(asset: AssetPayload, destination: Path) -> tuple[str, Path]:
     """Return one asset's download URL and where it may be written.
 
     The name comes from the release rather than from this repository, so
-    it is not trusted to stay inside the directory.
+    it is not trusted to stay inside the directory. Public because this
+    containment rule is the one decision here that a caller cannot
+    inspect its input for beforehand, and it is worth being able to
+    generate names against it rather than list them.
 
     Parameters
     ----------
@@ -448,10 +762,23 @@ def download_assets(release: ReleasePayload, destination: Path, api: Api) -> lis
     destination.mkdir(parents=True, exist_ok=True)
     headers = _headers(api.token, accept="application/octet-stream")
     written: list[Path] = []
-    for asset in assets_of(release):
-        url, target = _asset_target(asset, destination)
-        download(url, target, retry=api.retry, headers=headers)
-        written.append(target)
+    started = api.clock()
+    failure: BaseException | None = None
+    try:
+        for asset in assets_of(release):
+            url, target = asset_target(asset, destination)
+            download(url, target, retry=api.retry, headers=headers)
+            written.append(target)
+    except BaseException as error:
+        failure = error
+        raise
+    finally:
+        # The count is how many arrived, not how many were listed: on a
+        # failure the difference between the two is the whole story, and
+        # neither number alone tells it.
+        report("asset-download.outcome", outcome_of(failure))
+        report("asset-download.written", len(written))
+        report("asset-download.latency", latency_bucket(api.clock() - started))
     return written
 
 

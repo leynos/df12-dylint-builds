@@ -206,6 +206,53 @@ empty directory passes every check it is given, which
 is indistinguishable from success and is the outcome the audit exists to
 prevent.
 
+### What the reader is made of, and what it measures
+
+The reader is split along the line between deciding and doing, because a
+query that opens a socket cannot be exercised without one. `release_url`
+builds the lookup address and `release_from_payload` decides what a decoded
+body is; both are pure, and both are called directly in tests that inject a
+transport which fails if anything asks it to read. `release_for_tag` is the
+fallible boundary that composes them with the network. `asset_target` holds
+the containment rule for an asset name, which arrives from GitHub rather than
+from this repository, and it is public so the rule can be generated against
+rather than sampled by hand: Hypothesis draws traversal buried under
+real-looking directories, absolute names, and ordinary names that must be
+accepted.
+
+The transport, the sleeper between retries and the clock all travel on the
+`Api` value. A test therefore asserts the backoff schedule by reading it back
+rather than serving it out, and asserts a latency bucket without waiting for
+one.
+
+The reader emits metrics on standard output, one per line, prefixed
+`metric audit-draft.`. Maintainers read them in the `audit` job's log in the
+release workflow run; nothing is written anywhere else, because the script
+runs once per release and leaves nothing behind.
+
+| Metric | Values |
+| --- | --- |
+| `release-lookup.outcome` | `ok`, `retryable-status`, `permanent-status`, `not-json`, `transport-error` |
+| `release-lookup.attempts` | `1` to the retry policy's limit |
+| `release-lookup.latency` | `under-1s`, `under-5s`, `under-30s`, `under-120s`, `over-120s` |
+| `release-payload.outcome` | `ok`, `not-a-release` |
+| `asset-download.outcome` | as `release-lookup.outcome` |
+| `asset-download.written` | how many assets arrived |
+| `asset-download.latency` | as `release-lookup.latency` |
+
+Every value is drawn from a closed set or is a count, and a test asserts that
+no metric line carries the token, the API address or an asset name. Both rules
+matter: a token in a workflow log is a leak, and a raw duration or a URL as a
+metric value makes every run its own series, so the failure rate that matters
+is spread across all of them and countable in none.
+
+The lookup's outcome is reported from a `finally`, so the runs that failed are
+counted alongside the ones that succeeded. A retry rate read only from
+successes says nothing about the failures the retry did not prevent. The
+payload check is reported separately from the lookup because no retry would
+change its answer, and folding a permanent failure into the series read for
+transient ones is how a persistent defect comes to look like noise.
+
 ### When a release fails
 
 Two cases, and they are not the same.
