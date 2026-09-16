@@ -15,7 +15,17 @@ permissions:
 jobs:
   checks:
     name: Lint, format and workflow contracts
-    runs-on: ubicloud-standard-2
+    # A pull request from a fork cannot obtain an Ubicloud runner, so
+    # this job would never be scheduled and the pull request would wait
+    # on it indefinitely. The fallback is for forks alone; a dispatch and
+    # a same-repository pull request both read the field as absent and
+    # take the Ubicloud arm. The continuation stays at this indent: a
+    # more-indented line in a folded scalar keeps its break and puts a
+    # newline inside the expression, which GitHub evaluates regardless,
+    # so a green run is not evidence that it is absent.
+    runs-on: >-
+      ${{ github.event.pull_request.head.repo.fork
+      && 'ubuntu-latest' || 'ubicloud-standard-2' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -45,7 +55,11 @@ jobs:
 
   upstream-parity:
     name: Upstream sidecar and layout parity
-    runs-on: ubicloud-standard-2
+    # As `checks`: a fork takes the hosted arm, everything else takes
+    # the Ubicloud one.
+    runs-on: >-
+      ${{ github.event.pull_request.head.repo.fork
+      && 'ubuntu-latest' || 'ubicloud-standard-2' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
