@@ -28,10 +28,14 @@ jobs:
       - name: Markdown lint
         uses: DavidAnson/markdownlint-cli2-action@8de2aa07cae85fd17c0b35642db70cf5495f1d25
         with:
-          globs: |
-            **/*.md
-            !**/.uv-cache/**
-            !**/.uv-tools/**
+          globs: '**/*.md'
+      - name: Install mdtablefix
+        # `make check-fmt` runs `mdtablefix --check --git`; 0.6.0 is the
+        # first release with `--check` and `--git`.
+        uses: leynos/shared-actions/.github/actions/install-mdtablefix@c5a54701c8603a0fa756a6b34c49bc2af75a6c11
+        with:
+          version: "0.6.0"
+
       - name: Check formatting
         run: make check-fmt
       - name: Lint Python
