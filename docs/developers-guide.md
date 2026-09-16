@@ -222,6 +222,14 @@ The transport, the sleeper between retries and the clock all travel on the
 rather than serving it out, and asserts a latency bucket without waiting for
 one.
 
+Both reads use those seams, not only the lookup. `Transport`, `Sleeper` and the
+default `urlopen_bytes` live in `scripts/verify_upstream.py`, which owns the
+downloading, and `download` takes both as keyword arguments defaulting to the
+real ones. `download_assets` passes the ones it was handed, so an asset's
+retries are exercised against a table and a recorded schedule rather than a
+socket and a real wait. `urlopen_bytes` is the only place in either script that
+opens one.
+
 The reader emits metrics on standard output, one per line, prefixed
 `metric audit-draft.`. Maintainers read them in the `audit` job's log in the
 release workflow run; nothing is written anywhere else, because the script runs
