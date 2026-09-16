@@ -9,17 +9,27 @@ address as a label makes every run its own series.
 
 from __future__ import annotations
 
+import typing
 from pathlib import Path
 
 import pytest
 from audit_draft import (
     METRIC_PREFIX,
+    Api,
     Outcome,
     download_assets,
     latency_bucket,
     release_for_tag,
 )
-from audit_draft_support import REPO, TAG, TOKEN, ApiHandler, api_for, release_body
+from audit_draft_support import (
+    REPO,
+    TAG,
+    TOKEN,
+    UNREACHABLE,
+    ApiHandler,
+    api_for,
+    release_body,
+)
 from package import PackagingError
 
 
@@ -41,6 +51,24 @@ class _SteppingClock:
         reading = self.now
         self.now += self.step
         return reading
+
+
+class _BadBytesTransport:
+    """A transport answering with bytes that are not text at all.
+
+    A server can return a body that decodes before it parses and a body
+    that does neither. The second raises a different exception, and the
+    difference is what this exists to reach.
+    """
+
+    def __init__(self, body: bytes) -> None:
+        """Answer every read with ``body``."""
+        self.body = body
+
+    def __call__(self, url: str, headers: typing.Mapping[str, str]) -> bytes:
+        """Return the undecodable body, ignoring what was asked for."""
+        del url, headers
+        return self.body
 
 
 def _metrics(captured: str) -> dict[str, str]:
@@ -84,7 +112,10 @@ class TestTheLatencyLabelsAreBounded:
         self, seconds: float, expected: str
     ) -> None:
         """The bound is exclusive, so a bucket never includes its name."""
-        assert latency_bucket(seconds) == expected
+        assert latency_bucket(seconds) == expected, (
+            f"{seconds} seconds must be reported as {expected!r}, not "
+            f"{latency_bucket(seconds)!r}"
+        )
 
     def test_the_label_set_is_closed(self) -> None:
         """Every duration lands in one of five labels, and no other.
@@ -227,3 +258,92 @@ class TestTheAssetDownloadIsMeasured:
         found = _metrics(capsys.readouterr().out)
         assert found["asset-download.written"] == "0", found
         assert found["asset-download.outcome"] != Outcome.OK, found
+
+
+class TestAFailureIsNeverReportedAsSuccess:
+    """A lookup that fails must not leave `ok` in the log.
+
+    The outcome is reported from a `finally`, which runs however the
+    body left. That is only half the guarantee: the cause it reports is
+    read from a variable the `except` clauses set, so a failure that no
+    clause catches passes through the `finally` with the cause still
+    unset and is counted as a success.
+    """
+
+    def test_a_body_that_is_not_utf8_is_a_malformed_response(self) -> None:
+        """Bytes that are not text are a bad body, not a bad connection.
+
+        `json.loads` raises `UnicodeDecodeError` rather than
+        `JSONDecodeError` for these, and the two are siblings rather
+        than one being the other, so catching the JSON one alone lets
+        this through.
+        """
+        transport = _BadBytesTransport(b"\xff\xfe not utf-8 at all")
+        client = Api(token=TOKEN, root=UNREACHABLE, transport=transport)
+
+        with pytest.raises(PackagingError, match="not JSON"):
+            release_for_tag(REPO, TAG, client)
+
+    def test_the_metric_for_that_lookup_says_it_failed(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The same failure must be counted as one.
+
+        This is the half that matters for a rate. A read that raised and
+        was logged as `ok` makes the failure invisible in exactly the
+        measurement that exists to find it.
+        """
+        transport = _BadBytesTransport(b"\xff\xfe not utf-8 at all")
+        client = Api(token=TOKEN, root=UNREACHABLE, transport=transport)
+
+        with pytest.raises(PackagingError):
+            release_for_tag(REPO, TAG, client)
+
+        found = _metrics(capsys.readouterr().out)
+        assert found["release-lookup.outcome"] == Outcome.NOT_JSON, found
+
+
+class TestTheAssetOutcomeSaysWhichFailure:
+    """An asset failure is categorised rather than lumped together.
+
+    Every failure below `download_assets` arrives as `PackagingError`,
+    so classifying by exception type put a permanent status, an asset
+    name that would escape the directory, and a release with no assets
+    at all into one bucket named for the connection. Three different
+    faults reported as the same transient one.
+    """
+
+    def test_an_empty_release_is_not_reported_as_a_transport_error(
+        self, api: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Finding nothing to audit is the audit's own failure mode."""
+        with pytest.raises(PackagingError):
+            download_assets({"assets": []}, tmp_path / "dist", api_for(api))
+
+        found = _metrics(capsys.readouterr().out)
+        assert found["asset-download.outcome"] == Outcome.NO_ASSETS, found
+
+    def test_an_escaping_asset_name_reports_itself(
+        self, api: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A name that would leave the directory is a rejected asset."""
+        release = {"assets": [{"name": "../escape.tar.gz", "url": f"{api}/x"}]}
+
+        with pytest.raises(PackagingError):
+            download_assets(release, tmp_path / "dist", api_for(api))
+
+        found = _metrics(capsys.readouterr().out)
+        assert found["asset-download.outcome"] == Outcome.REJECTED_ASSET, found
+
+    def test_a_permanent_status_on_an_asset_reports_itself(
+        self, api: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A status no retry will change is not a transport error."""
+        ApiHandler.asset_mode = "permanent"
+        release = release_body(api, "a.tar.gz")
+
+        with pytest.raises(PackagingError):
+            download_assets(release, tmp_path / "dist", api_for(api))
+
+        found = _metrics(capsys.readouterr().out)
+        assert found["asset-download.outcome"] == Outcome.ASSET_UNREADABLE, found

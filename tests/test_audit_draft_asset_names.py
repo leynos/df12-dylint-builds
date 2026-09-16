@@ -8,6 +8,8 @@ archive-extraction invariant, and this follows it.
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+
 import pytest
 from audit_draft import asset_target
 from hypothesis import given, settings
@@ -72,7 +74,10 @@ def test_a_name_that_climbs_out_of_the_destination_is_refused(
     destination = tmp_path_factory.mktemp("assets")
     climb = data.draw(st.integers(min_value=depth + 1, max_value=depth + 3))
     parts = [f"d{index}" for index in range(depth)] + [".."] * climb + [leaf]
-    name = "/".join(parts)
+    # `PurePosixPath` rather than a join: an asset name is a path, and
+    # this is the spelling the repository asks for. It keeps every
+    # traversal case intact, because a pure path does not resolve `..`.
+    name = PurePosixPath(*parts).as_posix()
 
     with pytest.raises(PackagingError, match="would write outside"):
         asset_target({"name": name, "url": "https://example/x"}, destination)

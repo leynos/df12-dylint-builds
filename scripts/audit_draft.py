@@ -177,8 +177,20 @@ READ_FAILURES: Final = (
     urllib.error.URLError,
     http.client.HTTPException,
     json.JSONDecodeError,
+    # `json.loads` decodes before it parses, so bytes that are not text
+    # raise this instead, and it is a sibling of `JSONDecodeError`
+    # rather than one of its kind. Left out, it escaped the
+    # `PackagingError` contract altogether and, worse, passed through
+    # the metric's `finally` with no cause recorded, so a lookup that
+    # raised was counted as a success.
+    UnicodeDecodeError,
     OSError,
 )
+
+#: The failures that mean the server answered and the answer was not
+#: usable JSON. Asking again returns the same body, so neither is worth
+#: a retry, and both are the same thing to a reader of the metric.
+NOT_JSON_FAILURES: Final = (json.JSONDecodeError, UnicodeDecodeError)
 
 
 def _verdict_on(subject: str, error: Exception) -> Exception:
@@ -206,7 +218,7 @@ def _verdict_on(subject: str, error: Exception) -> Exception:
         if error.code in LOOKUP_RETRYABLE_STATUSES:
             return _TransientError(reason)
         return PackagingError(reason)
-    if isinstance(error, json.JSONDecodeError):
+    if isinstance(error, NOT_JSON_FAILURES):
         # The server answered, and answered with something that is not
         # JSON. Asking again returns the same body.
         return PackagingError(f"{subject}: returned a body that is not JSON")
@@ -256,6 +268,15 @@ class Outcome(enum.StrEnum):
     NOT_JSON = "not-json"
     NOT_A_RELEASE = "not-a-release"
     TRANSPORT_ERROR = "transport-error"
+    #: The release listed no assets. The audit's own failure mode
+    #: rather than a fault of the connection: an audit over an empty
+    #: directory passes every check it is given.
+    NO_ASSETS = "no-assets"
+    #: An asset's name or URL was unusable, most often a name that
+    #: would have been written outside the download directory.
+    REJECTED_ASSET = "rejected-asset"
+    #: An asset was listed and could not be fetched.
+    ASSET_UNREADABLE = "asset-unreadable"
 
 
 #: The latency buckets a duration is reported in, as an upper bound and
@@ -348,7 +369,7 @@ def outcome_of(error: BaseException | None) -> Outcome:
         if error.code in LOOKUP_RETRYABLE_STATUSES:
             return Outcome.RETRYABLE_STATUS
         return Outcome.PERMANENT_STATUS
-    if isinstance(error, json.JSONDecodeError):
+    if isinstance(error, NOT_JSON_FAILURES):
         return Outcome.NOT_JSON
     return Outcome.TRANSPORT_ERROR
 
@@ -763,20 +784,27 @@ def download_assets(release: ReleasePayload, destination: Path, api: Api) -> lis
     headers = _headers(api.token, accept="application/octet-stream")
     written: list[Path] = []
     started = api.clock()
-    failure: BaseException | None = None
+    # What would be reported if the next statement raised. Everything
+    # below fails as `PackagingError`, so classifying by exception type
+    # put an empty release, a name that would escape the directory and
+    # an unreachable asset into one bucket named for the connection:
+    # three faults, three remedies, one label. The stage is what tells
+    # them apart, so it is recorded as it is reached rather than
+    # reconstructed afterwards.
+    stage = Outcome.NO_ASSETS
     try:
         for asset in assets_of(release):
+            stage = Outcome.REJECTED_ASSET
             url, target = asset_target(asset, destination)
+            stage = Outcome.ASSET_UNREADABLE
             download(url, target, retry=api.retry, headers=headers)
             written.append(target)
-    except BaseException as error:
-        failure = error
-        raise
+        stage = Outcome.OK
     finally:
         # The count is how many arrived, not how many were listed: on a
         # failure the difference between the two is the whole story, and
         # neither number alone tells it.
-        report("asset-download.outcome", outcome_of(failure))
+        report("asset-download.outcome", stage)
         report("asset-download.written", len(written))
         report("asset-download.latency", latency_bucket(api.clock() - started))
     return written
