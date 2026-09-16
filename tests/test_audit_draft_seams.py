@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import typing
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from audit_draft import (
     DEFAULT_API,
     Api,
     Retry,
+    download_assets,
     release_for_tag,
     release_from_payload,
     release_url,
@@ -190,3 +192,102 @@ class TestTheRetryWaitsAreReadBackRatherThanServed:
         release_for_tag(REPO, TAG, client)
 
         assert sleeper.waits == [], sleeper.waits
+
+
+class _FailingThenAnsweringTransport:
+    """A transport that refuses a fixed number of reads, then answers.
+
+    The asset path's retry loop lives in the shared downloader, which
+    opened its own socket until this round. Driving it from here is the
+    only way to assert that a retry happens without waiting one out
+    against a real server.
+    """
+
+    def __init__(self, body: bytes, failures: int) -> None:
+        """Fail ``failures`` reads with a retryable status, then answer."""
+        self.body = body
+        self.remaining = failures
+        self.urls: list[str] = []
+
+    def __call__(self, url: str, headers: typing.Mapping[str, str]) -> bytes:
+        """Record ``url``, then raise or answer."""
+        self.urls.append(url)
+        if self.remaining:
+            self.remaining -= 1
+            raise urllib.error.HTTPError(url, 503, "busy", {}, None)  # type: ignore[arg-type]
+        return self.body
+
+
+class TestTheAssetDownloadsUseTheSameSeams:
+    """An asset body goes through the injected transport and sleeper.
+
+    The release lookup was injected a round earlier and the asset
+    downloads were not: `download_assets` held an `Api` carrying a
+    transport, a sleeper and a clock, and called the shared downloader
+    with neither of the first two. Everything below the lookup therefore
+    reached the real socket and the real clock, and no test could say so
+    because the stand-in server answered either way.
+    """
+
+    def test_an_asset_body_arrives_through_the_transport_it_was_given(
+        self, tmp_path: Path
+    ) -> None:
+        """The asset is written from what the transport returned.
+
+        The root points at a port nothing listens on, so a download that
+        reached `urllib` would fail rather than quietly agree.
+        """
+        transport = _TabledTransport(b"an archive")
+        client = Api(token=TOKEN, root=UNREACHABLE, transport=transport)
+        release = release_body(UNREACHABLE, "a.tar.gz")
+
+        written = download_assets(release, tmp_path, client)
+
+        assert written == [tmp_path / "a.tar.gz"], written
+        assert written[0].read_bytes() == b"an archive"
+        assert transport.urls == [f"{UNREACHABLE}/repos/{REPO}/releases/assets/0"], (
+            transport.urls
+        )
+
+    def test_an_asset_retry_waits_on_the_sleeper_it_was_given(
+        self, tmp_path: Path
+    ) -> None:
+        """A retried asset waits the growing schedule, and waits none of it.
+
+        Two retryable failures then a body: the wait after each failure
+        is recorded rather than served, so the schedule is an assertion
+        instead of a delay.
+        """
+        transport = _FailingThenAnsweringTransport(b"an archive", failures=2)
+        sleeper = _RecordingSleeper()
+        client = Api(
+            token=TOKEN,
+            root=UNREACHABLE,
+            retry=Retry(attempts=3, backoff=2),
+            transport=transport,
+            sleeper=sleeper,
+        )
+        release = release_body(UNREACHABLE, "a.tar.gz")
+
+        written = download_assets(release, tmp_path, client)
+
+        assert written[0].read_bytes() == b"an archive"
+        assert sleeper.waits == [2.0, 4.0], (
+            f"two failures before the body arrived, growing: {sleeper.waits}"
+        )
+
+    def test_an_asset_download_never_reaches_the_network_itself(
+        self, tmp_path: Path
+    ) -> None:
+        """Handing down a refusing transport stops the download dead.
+
+        The other direction of the same claim. If the shared downloader
+        still opened its own socket, this would pass by reaching the
+        unreachable root and failing there, so the assertion is on the
+        refusal's own message rather than on the failure alone.
+        """
+        client = Api(token=TOKEN, root=UNREACHABLE, transport=_RefusingTransport())
+        release = release_body(UNREACHABLE, "a.tar.gz")
+
+        with pytest.raises(AssertionError, match="a query path opened a connection"):
+            download_assets(release, tmp_path, client)
