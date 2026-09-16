@@ -282,3 +282,101 @@ class TestTheCommandLine:
         assert "push access" in capsys.readouterr().err, (
             "the failure must name the permission it needs"
         )
+
+
+class TestAResponseThatIsNotARelease:
+    """A body that does not decode fails the step rather than the audit.
+
+    The reader's malformed-payload path was covered against decoded
+    values, which reaches the type checks but never the decoder. A body
+    built by `json.dumps` always decodes, so the stand-in API grew a
+    verbatim mode to serve one that does not.
+    """
+
+    def test_a_body_that_is_not_json_is_refused(self, api: str) -> None:
+        """A truncated object names the subject it failed to read."""
+        ApiHandler.release_raw = b'{"assets": [{"name": '
+
+        with pytest.raises(PackagingError, match="release"):
+            release_for_tag(REPO, TAG, api_for(api))
+
+    def test_a_malformed_body_exits_one_and_writes_nothing(
+        self, api: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The command line reports the failure and leaves no directory content.
+
+        Asserted through `main` rather than the reader, because the step
+        this script is invoked by reads the exit status and nothing
+        else, and a run that failed after writing half a release would
+        be worse than one that failed before writing any of it.
+        """
+        ApiHandler.release_raw = b"not json at all"
+        destination = tmp_path / "dist"
+
+        code = main(
+            [
+                "--repo",
+                REPO,
+                "--tag",
+                TAG,
+                "--token",
+                TOKEN,
+                "--dir",
+                str(destination),
+                "--api",
+                api,
+                "--retry-backoff",
+                "0",
+            ]
+        )
+
+        assert code == 1, "a body that is not a release must fail the step"
+        assert capsys.readouterr().err.strip(), "the failure must say something"
+        assert not destination.exists() or not list(destination.iterdir()), (
+            "nothing may be written from a release that could not be read"
+        )
+
+
+class TestAnAssetFieldThatIsNotUsable:
+    """An asset naming nothing usable stops the download before it starts.
+
+    `_required_text` refuses an absent, empty or non-string field, and
+    each of the three is a different way for GitHub's payload to be
+    unusable. Parametrised over both fields, because the rule is about
+    the field's value and a test naming only `name` would leave `url`
+    proved by inspection.
+    """
+
+    @pytest.mark.parametrize("field", ["name", "url"])
+    @pytest.mark.parametrize(
+        ("value", "why"),
+        [
+            pytest.param(None, "absent", id="absent"),
+            pytest.param("", "empty", id="empty"),
+            pytest.param(7, "not a string", id="not-a-string"),
+        ],
+    )
+    def test_no_asset_is_written(
+        self, api: str, tmp_path: Path, field: str, value: object, why: str
+    ) -> None:
+        """The run fails naming the field, and the directory stays empty.
+
+        The destination is checked as well as the exception, because
+        `download_assets` creates the directory before it reads the
+        first asset and an early failure that still wrote a file would
+        raise in exactly the same way.
+        """
+        release = release_body(api, "a.tar.gz")
+        asset = release["assets"][0]
+        if value is None:
+            del asset[field]
+        else:
+            asset[field] = value
+        destination = tmp_path / "dist"
+
+        with pytest.raises(PackagingError, match=f"no {field}"):
+            download_assets(release, destination, api_for(api))
+
+        assert list(destination.iterdir()) == [], (
+            f"an asset whose {field} is {why} must leave the directory empty"
+        )

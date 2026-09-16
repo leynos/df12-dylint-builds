@@ -79,6 +79,12 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
     #: because a read without push access sees nothing, so what it sends
     #: is the mechanism and has to be assertable.
     seen_headers: typing.ClassVar[list[tuple[str, dict[str, str]]]] = []
+    #: A release body to serve verbatim, bypassing the JSON encoding.
+    #: `None` serves `release` encoded. This exists so a response that
+    #: is not JSON at all can be served: a body built by `json.dumps`
+    #: always decodes, so the reader's malformed-payload path could not
+    #: otherwise be reached through the API a caller actually uses.
+    release_raw: typing.ClassVar[bytes | None] = None
 
     def do_GET(self) -> None:
         """Serve the release lookup or an asset body.
@@ -115,7 +121,11 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
         if self.release_status is not None:
             self.send_error(self.release_status, "no")
             return
-        body = json.dumps(self.release).encode()
+        body = (
+            self.release_raw
+            if self.release_raw is not None
+            else json.dumps(self.release).encode()
+        )
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -156,6 +166,7 @@ def api() -> Iterator[str]:
     ApiHandler.release_first_status = None
     ApiHandler.release_paths = []
     ApiHandler.seen_headers = []
+    ApiHandler.release_raw = None
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ApiHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
