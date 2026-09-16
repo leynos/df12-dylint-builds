@@ -56,12 +56,66 @@ class Retry(typing.NamedTuple):
 DEFAULT_RETRY: Final = Retry()
 
 
+class Transport(typing.Protocol):
+    """How a read reaches the network.
+
+    Named so the reading can be handed over rather than reached for. A
+    test supplies one that answers from a table, or one that refuses to
+    be called at all; the latter is what lets a caller state that the
+    path under it made no request.
+    """
+
+    def __call__(self, url: str, headers: Mapping[str, str]) -> bytes:
+        """Return the body at ``url``, or raise a transport failure."""
+        ...
+
+
+class Sleeper(typing.Protocol):
+    """How a retry waits.
+
+    Injected for the same reason as the transport: the waiting is a
+    decision this module makes, and a test that has to serve it out in
+    real seconds is a test nobody runs.
+    """
+
+    def __call__(self, seconds: float, /) -> None:
+        """Wait for ``seconds``."""
+        ...
+
+
+def urlopen_bytes(url: str, headers: Mapping[str, str]) -> bytes:
+    """Read ``url`` over HTTP and return the whole body.
+
+    The default transport, and the only place in this repository that
+    opens a socket for a download. Keeping it separate from the retry
+    loop is what lets every caller of :func:`download` exercise that
+    loop without one.
+
+    Parameters
+    ----------
+    url:
+        The address to read.
+    headers:
+        The request headers, already carrying any token.
+
+    Returns
+    -------
+    bytes
+        The response body.
+    """
+    request = urllib.request.Request(url, headers=dict(headers))
+    with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+        return response.read()
+
+
 def download(
     url: str,
     destination: Path,
     *,
     retry: Retry = DEFAULT_RETRY,
     headers: Mapping[str, str] = NO_HEADERS,
+    transport: Transport = urlopen_bytes,
+    sleeper: Sleeper = time.sleep,
 ) -> Path:
     """Download ``url`` to ``destination``, retrying transient failures.
 
@@ -80,6 +134,15 @@ def download(
         how an authenticated read passes its token, so that a draft release,
         which is invisible without push access, can be fetched by the same
         retrying reader as a public archive.
+    transport:
+        What performs the read. Defaults to the real one. A caller that
+        already holds an injected transport passes it here, so that its
+        retries are exercised without a socket rather than only its
+        first attempt.
+    sleeper:
+        What waits between attempts. Defaults to `time.sleep`. Injected
+        for the same reason: a backoff served out in real seconds is a
+        backoff no test asserts.
 
     Returns
     -------
@@ -97,9 +160,7 @@ def download(
     last: Exception | None = None
     for attempt in range(1, retry.attempts + 1):
         try:
-            request = urllib.request.Request(url, headers=request_headers)
-            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-                payload = response.read()
+            payload = transport(url, request_headers)
         except urllib.error.HTTPError as error:
             if error.code not in RETRYABLE_STATUSES:
                 raise PackagingError(
@@ -123,7 +184,7 @@ def download(
         if attempt == retry.attempts:
             break
         print(f"attempt {attempt} for {url} failed: {last}; retrying")
-        time.sleep(retry.backoff * attempt)
+        sleeper(retry.backoff * attempt)
     message = f"could not download {url} after {retry.attempts} attempts: {last}"
     raise PackagingError(message)
 

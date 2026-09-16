@@ -38,10 +38,12 @@ from package import PackagingError
 from verify_upstream import (
     DEFAULT_RETRY,
     RETRYABLE_STATUSES,
-    TIMEOUT_SECONDS,
     USER_AGENT,
     Retry,
+    Sleeper,
+    Transport,
     download,
+    urlopen_bytes,
 )
 
 #: One asset as the releases API describes it. The values are `object`
@@ -59,20 +61,6 @@ DEFAULT_API: Final = "https://api.github.com"
 API_VERSION: Final = "2022-11-28"
 
 
-class JsonTransport(typing.Protocol):
-    """How a JSON read reaches the network.
-
-    Named so the reading can be handed over, rather than reached for.
-    A test supplies one that answers from a table, or one that refuses
-    to be called at all; the latter is what lets a query test state that
-    the path under it made no request.
-    """
-
-    def __call__(self, url: str, headers: Mapping[str, str]) -> bytes:
-        """Return the body at ``url``, or raise one of `READ_FAILURES`."""
-        ...
-
-
 class Clock(typing.Protocol):
     """Where a duration comes from.
 
@@ -84,43 +72,6 @@ class Clock(typing.Protocol):
     def __call__(self) -> float:
         """Return the current reading, in seconds."""
         ...
-
-
-class Sleeper(typing.Protocol):
-    """How a retry waits.
-
-    Injected for the same reason as the transport: the waiting is a
-    decision this module makes, and a test that has to serve it out in
-    real seconds is a test nobody runs.
-    """
-
-    def __call__(self, seconds: float, /) -> None:
-        """Wait for ``seconds``."""
-        ...
-
-
-def urlopen_bytes(url: str, headers: Mapping[str, str]) -> bytes:
-    """Read ``url`` over HTTP and return the whole body.
-
-    The default transport. It is the only place in this module that
-    opens a socket, which is what makes the rest of it testable without
-    one.
-
-    Parameters
-    ----------
-    url:
-        The address to read.
-    headers:
-        The request headers, already carrying the token.
-
-    Returns
-    -------
-    bytes
-        The response body.
-    """
-    request = urllib.request.Request(url, headers=dict(headers))
-    with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-        return response.read()
 
 
 class Api(typing.NamedTuple):
@@ -143,7 +94,8 @@ class Api(typing.NamedTuple):
     retry:
         How many times to try a read, and how long to wait between.
     transport:
-        What performs the read. Defaults to the real one.
+        What performs every read, the release lookup and each
+        asset body alike. Defaults to the real one.
     sleeper:
         What waits between attempts. Defaults to `time.sleep`.
     clock:
@@ -154,7 +106,7 @@ class Api(typing.NamedTuple):
     token: str
     root: str = DEFAULT_API
     retry: Retry = DEFAULT_RETRY
-    transport: JsonTransport = urlopen_bytes
+    transport: Transport = urlopen_bytes
     sleeper: Sleeper = time.sleep
     clock: Clock = time.monotonic
 
@@ -394,7 +346,7 @@ def _read_json_once(
     headers: Mapping[str, str],
     *,
     subject: str,
-    transport: JsonTransport,
+    transport: Transport,
 ) -> object:
     """Read one JSON document, or raise the verdict on the failure.
 
@@ -797,7 +749,14 @@ def download_assets(release: ReleasePayload, destination: Path, api: Api) -> lis
             stage = Outcome.REJECTED_ASSET
             url, target = asset_target(asset, destination)
             stage = Outcome.ASSET_UNREADABLE
-            download(url, target, retry=api.retry, headers=headers)
+            download(
+                url,
+                target,
+                retry=api.retry,
+                headers=headers,
+                transport=api.transport,
+                sleeper=api.sleeper,
+            )
             written.append(target)
         stage = Outcome.OK
     finally:
