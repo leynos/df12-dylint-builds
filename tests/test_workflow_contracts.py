@@ -21,6 +21,26 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 SHA_PIN = re.compile(r"^[^@]+@[0-9a-f]{40}$")
 WORKFLOW_NAMES = ("release.yml", "ci.yml")
+#: The event field that distinguishes a fork's pull request. Named once
+#: so the placement contract asserts this field rather than matching the
+#: expression loosely.
+FORK_FIELD = "github.event.pull_request.head.repo.fork"
+#: A quoted arm of a `runs-on` expression: the labels the job can land on.
+RUNNER_ARM = re.compile(r"'([^']+)'")
+GITHUB_HOSTED_LABELS = frozenset(
+    {
+        "ubuntu-latest",
+        "ubuntu-24.04",
+        "ubuntu-22.04",
+        "windows-latest",
+        "macos-latest",
+        "macos-15-intel",
+    }
+)
+#: The release jobs that run on a GitHub-hosted label today. Four of them
+#: are movable tag lanes and are deliberately not moved here; the two
+#: matrix legs are absent because their labels come from dylint.toml.
+HOSTED_RELEASE_JOBS = frozenset({"prepare", "create-release", "audit", "publish"})
 
 # Upstream's asset names, from the release this repository mirrors. The
 # archives published here must be indistinguishable in shape from these.
@@ -581,3 +601,95 @@ def test_ci_checks_upstream_parity_against_the_live_release(ci: dict[str, Any]) 
     """
     commands = steps_running(ci, "upstream-parity", "scripts/verify_upstream.py")
     assert len(commands) == 1, commands
+
+
+def test_no_runner_selection_hides_a_line_break(
+    release: dict[str, Any], ci: dict[str, Any]
+) -> None:
+    """Every ``runs-on`` parses to a single line.
+
+    A folded scalar keeps the break of a more-indented continuation, so
+    the parsed value carries a newline inside the expression. GitHub
+    evaluates it regardless and the job lands on the right runner, which
+    is exactly why a green run proves nothing and this reads the parsed
+    document instead.
+
+    Read across both workflows rather than the CI lanes alone: the
+    release matrix takes its label from an expression too, and the fault
+    is a property of the declaration, not of which lane declares it.
+
+    Mutation: indenting the continuation of ``checks``'s ``runs-on`` one
+    level deeper failed this contract.
+    """
+    for name, workflow in (("release.yml", release), ("ci.yml", ci)):
+        for job, spec in jobs_of(workflow).items():
+            declaration = spec.get("runs-on", "")
+            assert "\n" not in str(declaration), (
+                f"{name}:{job} declares a runs-on carrying a line break, so "
+                f"the expression is split across lines: {declaration!r}"
+            )
+
+
+def test_every_ci_lane_falls_back_to_a_hosted_runner_for_a_fork(
+    ci: dict[str, Any],
+) -> None:
+    """A fork's pull request lands on a GitHub-hosted runner.
+
+    A fork cannot obtain an Ubicloud runner, so a bare Ubicloud label
+    leaves the job unschedulable and the pull request waiting on a check
+    that will never start.
+
+    Stated over every job in the workflow rather than the two named
+    today, so a lane added later cannot be the one that omits it. The
+    fork field is asserted by name because the failure this guards
+    against is a plausible sibling field in an otherwise identical
+    expression: ``head.repo.private`` reads almost the same and would
+    send every private-repository pull request to a hosted runner.
+
+    Mutations: replacing ``head.repo.fork`` with ``head.repo.private``
+    failed this contract, and so did restoring a bare
+    ``ubicloud-standard-2``.
+    """
+    for job, spec in jobs_of(ci).items():
+        declaration = str(spec.get("runs-on", ""))
+        assert FORK_FIELD in declaration, (
+            f"ci.yml:{job} must key its runner on {FORK_FIELD} so a fork's "
+            f"pull request can run it: {declaration!r}"
+        )
+        arms = set(RUNNER_ARM.findall(declaration))
+        assert arms & GITHUB_HOSTED_LABELS, (
+            f"ci.yml:{job} names no GitHub-hosted arm: {sorted(arms)}"
+        )
+        assert arms - GITHUB_HOSTED_LABELS, (
+            f"ci.yml:{job} names no Ubicloud arm: {sorted(arms)}"
+        )
+
+
+def test_the_release_lanes_stay_where_they_are(release: dict[str, Any]) -> None:
+    """The release workflow is untouched by this change, and says so.
+
+    Tag lanes are movable under the placement rule and four of these six
+    jobs could take an Ubicloud runner. They are deliberately left alone
+    here so that this change is one bounded thing, and this contract is
+    what stops the two halves being confused: a later placement change to
+    the release lane has to edit this list, which is where the decision
+    gets recorded.
+
+    The two matrix legs are not in the list because they must never move.
+    They exist to build the Apple and Windows targets upstream omits, and
+    their labels come from ``dylint.toml`` rather than from this file.
+
+    Mutation: putting an Ubicloud label on ``prepare`` failed this
+    contract.
+    """
+    hosted = {
+        job
+        for job, spec in jobs_of(release).items()
+        if str(spec.get("runs-on", "")) in GITHUB_HOSTED_LABELS
+    }
+
+    assert hosted == HOSTED_RELEASE_JOBS, (
+        f"release.yml's GitHub-hosted jobs changed: {sorted(hosted)} against "
+        f"{sorted(HOSTED_RELEASE_JOBS)}. Moving one is a placement decision "
+        "and belongs in a change of its own."
+    )
