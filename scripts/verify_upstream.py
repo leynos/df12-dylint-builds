@@ -108,14 +108,40 @@ def urlopen_bytes(url: str, headers: Mapping[str, str]) -> bytes:
         return response.read()
 
 
+class Reader(typing.NamedTuple):
+    """How a download reads, and how hard it tries.
+
+    One value rather than three parameters, for the reason `Retry` is
+    one rather than two: the policy and the machinery that enacts it are
+    a single decision, and a call naming one of them by keyword read as
+    though the others had been forgotten. A caller that already holds
+    these passes them on, so that a retry below it is exercised through
+    the same table and the same recorded schedule as the read above it.
+
+    Attributes
+    ----------
+    retry:
+        How many times to try, and how long to wait between attempts.
+    transport:
+        What performs the read. Defaults to the real one.
+    sleeper:
+        What waits between attempts. Defaults to `time.sleep`.
+    """
+
+    retry: Retry = DEFAULT_RETRY
+    transport: Transport = urlopen_bytes
+    sleeper: Sleeper = time.sleep
+
+
+DEFAULT_READER: Final = Reader()
+
+
 def download(
     url: str,
     destination: Path,
     *,
-    retry: Retry = DEFAULT_RETRY,
     headers: Mapping[str, str] = NO_HEADERS,
-    transport: Transport = urlopen_bytes,
-    sleeper: Sleeper = time.sleep,
+    reader: Reader = DEFAULT_READER,
 ) -> Path:
     """Download ``url`` to ``destination``, retrying transient failures.
 
@@ -127,22 +153,17 @@ def download(
         Where to write the response body. Nothing is written unless the whole
         body arrives, so a truncated response cannot be mistaken for an
         archive.
-    retry:
-        How many times to try, and how long to wait between attempts.
     headers:
         Extra request headers, merged over the default user agent. This is
         how an authenticated read passes its token, so that a draft release,
         which is invisible without push access, can be fetched by the same
         retrying reader as a public archive.
-    transport:
-        What performs the read. Defaults to the real one. A caller that
-        already holds an injected transport passes it here, so that its
-        retries are exercised without a socket rather than only its
-        first attempt.
-    sleeper:
-        What waits between attempts. Defaults to `time.sleep`. Injected
-        for the same reason: a backoff served out in real seconds is a
-        backoff no test asserts.
+    reader:
+        How the read is performed and how hard it tries. A caller that
+        already holds an injected transport and sleeper passes them
+        here, so that the retries below it are exercised without a
+        socket and without a real wait rather than only its first
+        attempt.
 
     Returns
     -------
@@ -158,9 +179,9 @@ def download(
     """
     request_headers = {"User-Agent": USER_AGENT, **headers}
     last: Exception | None = None
-    for attempt in range(1, retry.attempts + 1):
+    for attempt in range(1, reader.retry.attempts + 1):
         try:
-            payload = transport(url, request_headers)
+            payload = reader.transport(url, request_headers)
         except urllib.error.HTTPError as error:
             if error.code not in RETRYABLE_STATUSES:
                 raise PackagingError(
@@ -181,11 +202,11 @@ def download(
                     f"could not write {destination}: {error}"
                 ) from error
             return destination
-        if attempt == retry.attempts:
+        if attempt == reader.retry.attempts:
             break
         print(f"attempt {attempt} for {url} failed: {last}; retrying")
-        sleeper(retry.backoff * attempt)
-    message = f"could not download {url} after {retry.attempts} attempts: {last}"
+        reader.sleeper(reader.retry.backoff * attempt)
+    message = f"could not download {url} after {reader.retry.attempts} attempts: {last}"
     raise PackagingError(message)
 
 

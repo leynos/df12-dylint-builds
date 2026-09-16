@@ -39,6 +39,7 @@ from verify_upstream import (
     DEFAULT_RETRY,
     RETRYABLE_STATUSES,
     USER_AGENT,
+    Reader,
     Retry,
     Sleeper,
     Transport,
@@ -109,6 +110,23 @@ class Api(typing.NamedTuple):
     transport: Transport = urlopen_bytes
     sleeper: Sleeper = time.sleep
     clock: Clock = time.monotonic
+
+    @property
+    def reader(self) -> Reader:
+        """Return the three of these that a download needs.
+
+        The lookup composes them itself, because it reports a metric
+        around each attempt and so owns its own loop. An asset body goes
+        through the shared downloader, which owns that loop instead, and
+        this is what hands it the same transport and the same sleeper
+        rather than letting it reach for the real ones.
+
+        Returns
+        -------
+        Reader
+            The retry policy, the transport and the sleeper.
+        """
+        return Reader(self.retry, self.transport, self.sleeper)
 
 
 class _TransientError(Exception):
@@ -749,14 +767,7 @@ def download_assets(release: ReleasePayload, destination: Path, api: Api) -> lis
             stage = Outcome.REJECTED_ASSET
             url, target = asset_target(asset, destination)
             stage = Outcome.ASSET_UNREADABLE
-            download(
-                url,
-                target,
-                retry=api.retry,
-                headers=headers,
-                transport=api.transport,
-                sleeper=api.sleeper,
-            )
+            download(url, target, headers=headers, reader=api.reader)
             written.append(target)
         stage = Outcome.OK
     finally:

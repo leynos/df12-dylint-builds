@@ -14,7 +14,14 @@ import pytest
 from conftest import FIXTURE_COMMIT, FIXTURE_CONFIG, write_stubs
 from dylint_config import parse_config
 from package import PackagingError, pack, write_sidecar
-from verify_upstream import USER_AGENT, Retry, download, main, verify_upstream
+from verify_upstream import (
+    USER_AGENT,
+    Reader,
+    Retry,
+    download,
+    main,
+    verify_upstream,
+)
 
 UPSTREAM_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")
 
@@ -220,7 +227,11 @@ def test_a_download_that_cannot_be_written_names_the_destination(
     (root / "probe.txt").write_bytes(b"probe")
     destination = tmp_path / "absent-directory" / "probe.txt"
     with pytest.raises(PackagingError, match="could not write"):
-        download(f"{base_url}/v6.0.4/probe.txt", destination, retry=Retry(backoff=0))
+        download(
+            f"{base_url}/v6.0.4/probe.txt",
+            destination,
+            reader=Reader(retry=Retry(backoff=0)),
+        )
 
 
 def test_a_download_is_retried_before_it_fails(
@@ -231,7 +242,7 @@ def test_a_download_is_retried_before_it_fails(
         download(
             "http://127.0.0.1:1/absent",
             tmp_path / "out",
-            retry=Retry(attempts=2, backoff=0),
+            reader=Reader(retry=Retry(attempts=2, backoff=0)),
         )
     assert "attempt 1" in capsys.readouterr().out
 
@@ -261,7 +272,9 @@ def test_a_permanent_status_is_not_retried(
     base_url, _ = upstream_server
     with pytest.raises(PackagingError, match="HTTP 404"):
         download(
-            f"{base_url}/v6.0.4/absent.tar.gz", tmp_path / "out", retry=Retry(backoff=0)
+            f"{base_url}/v6.0.4/absent.tar.gz",
+            tmp_path / "out",
+            reader=Reader(retry=Retry(backoff=0)),
         )
     assert "retrying" not in capsys.readouterr().out, (
         "a status that will not change must fail without a retry"
@@ -277,7 +290,7 @@ def test_a_truncated_response_is_retried_and_never_written(
         download(
             f"{truncating_server}/anything",
             destination,
-            retry=Retry(attempts=2, backoff=0),
+            reader=Reader(retry=Retry(attempts=2, backoff=0)),
         )
     assert not destination.exists(), "a truncated body must not be written out"
 
@@ -299,7 +312,9 @@ def test_a_retryable_status_is_retried_and_then_succeeds(
     one distinguishes a status worth retrying from one that is not.
     """
     destination = download(
-        f"{flaky_server}/asset.tar.gz", tmp_path / "out", retry=Retry(backoff=0)
+        f"{flaky_server}/asset.tar.gz",
+        tmp_path / "out",
+        reader=Reader(retry=Retry(backoff=0)),
     )
     assert destination.read_bytes() == _FlakyHandler.payload, (
         "the retry must write the body of the attempt that succeeded"
@@ -400,7 +415,7 @@ def test_supplied_headers_are_sent_alongside_the_default_user_agent(
     download(
         f"{header_server}/asset",
         tmp_path / "asset",
-        retry=Retry(attempts=1, backoff=0),
+        reader=Reader(retry=Retry(attempts=1, backoff=0)),
         headers={"Authorization": "Bearer a-token"},
     )
 
@@ -420,7 +435,7 @@ def test_a_supplied_user_agent_replaces_the_default(
     download(
         f"{header_server}/asset",
         tmp_path / "asset",
-        retry=Retry(attempts=1, backoff=0),
+        reader=Reader(retry=Retry(attempts=1, backoff=0)),
         headers={"User-Agent": "something-else"},
     )
 
@@ -432,7 +447,9 @@ def test_a_download_with_no_headers_still_names_this_tool(
 ) -> None:
     """The default survives the parameter being added."""
     download(
-        f"{header_server}/asset", tmp_path / "asset", retry=Retry(attempts=1, backoff=0)
+        f"{header_server}/asset",
+        tmp_path / "asset",
+        reader=Reader(retry=Retry(attempts=1, backoff=0)),
     )
 
     assert _HeaderRecordingHandler.seen[0].get("user-agent") == USER_AGENT

@@ -224,11 +224,11 @@ one.
 
 Both reads use those seams, not only the lookup. `Transport`, `Sleeper` and the
 default `urlopen_bytes` live in `scripts/verify_upstream.py`, which owns the
-downloading, and `download` takes both as keyword arguments defaulting to the
-real ones. `download_assets` passes the ones it was handed, so an asset's
-retries are exercised against a table and a recorded schedule rather than a
-socket and a real wait. `urlopen_bytes` is the only place in either script that
-opens one.
+downloading, and the three travel together on a `Reader` beside the retry
+policy, for the reason `Retry` groups its own pair. `download` takes one, and
+`Api.reader` composes the three the caller is holding, so an asset's retries
+are exercised against a table and a recorded schedule rather than a socket and
+a real wait. `urlopen_bytes` is the only place in either script that opens one.
 
 The reader emits metrics on standard output, one per line, prefixed
 `metric audit-draft.`. Maintainers read them in the `audit` job's log in the

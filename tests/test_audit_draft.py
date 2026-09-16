@@ -349,15 +349,15 @@ class TestAnAssetFieldThatIsNotUsable:
 
     @pytest.mark.parametrize("field", ["name", "url"])
     @pytest.mark.parametrize(
-        ("value", "why"),
+        "value",
         [
-            pytest.param(None, "absent", id="absent"),
-            pytest.param("", "empty", id="empty"),
-            pytest.param(7, "not a string", id="not-a-string"),
+            pytest.param(None, id="absent"),
+            pytest.param("", id="empty"),
+            pytest.param(7, id="not-a-string"),
         ],
     )
     def test_no_asset_is_written(
-        self, api: str, tmp_path: Path, field: str, value: object, why: str
+        self, api: str, tmp_path: Path, field: str, value: object
     ) -> None:
         """The run fails naming the field, and the directory stays empty.
 
@@ -378,5 +378,5 @@ class TestAnAssetFieldThatIsNotUsable:
             download_assets(release, destination, api_for(api))
 
         assert list(destination.iterdir()) == [], (
-            f"an asset whose {field} is {why} must leave the directory empty"
+            f"an asset whose {field} is {value!r} must leave the directory empty"
         )
