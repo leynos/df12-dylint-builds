@@ -7,8 +7,8 @@ naming scheme and the consumer contract.
 ## Rules
 
 - `dylint.toml` is the single source of truth. The release workflow derives
-  its matrix from it and the contract tests read it; never hard-code a
-  version, target, runner label or archive name anywhere else.
+  its matrix from it and the contract tests read it; never hard-code a version,
+  target, runner label or archive name anywhere else.
 - Dylint is pinned to an upstream tag **and** the commit that tag resolved
   to. The build checks out the commit, so a moved tag cannot change what is
   built.
@@ -34,10 +34,10 @@ naming scheme and the consumer contract.
 Run `make all` before committing. It executes `make check-fmt`, `make lint`
 (ruff and markdownlint) and `make test` (unit tests, property tests and the
 workflow contracts). Each contract matches the mechanism it protects, the
-`run:` command or the exact label, not a step name. Adding one means
-mutating the protected line once, confirming the test fails, and recording
-that mutation in the test's doc comment.
+`run:` command or the exact label, not a step name. Adding one means mutating
+the protected line once, confirming the test fails, and recording that mutation
+in the test's doc comment.
 
-Commit messages use the imperative mood, a subject of about 50 characters,
-and a body wrapped at 72 columns explaining what changed and why. Do not add
+Commit messages use the imperative mood, a subject of about 50 characters, and
+a body wrapped at 72 columns explaining what changed and why. Do not add
 attribution or session trailers.
