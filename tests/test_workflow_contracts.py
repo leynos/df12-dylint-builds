@@ -17,10 +17,10 @@ import pytest
 import yaml
 from dylint_config import Config, default_config_path, load_config
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-WORKFLOWS = REPO_ROOT / ".github" / "workflows"
-SHA_PIN = re.compile(r"^[^@]+@[0-9a-f]{40}$")
-WORKFLOW_NAMES = ("release.yml", "ci.yml")
+REPO_ROOT: Path = Path(__file__).resolve().parents[1]
+WORKFLOWS: Path = REPO_ROOT / ".github" / "workflows"
+SHA_PIN: re.Pattern[str] = re.compile(r"^[^@]+@[0-9a-f]{40}$")
+WORKFLOW_NAMES: tuple[str, ...] = ("release.yml", "ci.yml")
 
 # Upstream's asset names, from the release this repository mirrors. The
 # archives published here must be indistinguishable in shape from these.
