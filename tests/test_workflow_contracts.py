@@ -17,30 +17,72 @@ import pytest
 import yaml
 from dylint_config import Config, default_config_path, load_config
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-WORKFLOWS = REPO_ROOT / ".github" / "workflows"
-SHA_PIN = re.compile(r"^[^@]+@[0-9a-f]{40}$")
-WORKFLOW_NAMES = ("release.yml", "ci.yml")
+REPO_ROOT: Path = Path(__file__).resolve().parents[1]
+WORKFLOWS: Path = REPO_ROOT / ".github" / "workflows"
+SHA_PIN: re.Pattern[str] = re.compile(r"^[^@]+@[0-9a-f]{40}$")
+WORKFLOW_NAMES: tuple[str, ...] = ("release.yml", "ci.yml")
+
 #: The event field that distinguishes a fork's pull request. Named once
 #: so the placement contract asserts this field rather than matching the
 #: expression loosely.
-FORK_FIELD = "github.event.pull_request.head.repo.fork"
-#: A quoted arm of a `runs-on` expression: the labels the job can land on.
-RUNNER_ARM = re.compile(r"'([^']+)'")
-GITHUB_HOSTED_LABELS = frozenset(
-    {
-        "ubuntu-latest",
-        "ubuntu-24.04",
-        "ubuntu-22.04",
-        "windows-latest",
-        "macos-latest",
-        "macos-15-intel",
-    }
+FORK_FIELD: str = "github.event.pull_request.head.repo.fork"
+
+#: The paid runner the CI lanes use when they can. Written here once, and
+#: asserted as this exact label: "not a GitHub-hosted label" would be
+#: satisfied by a misspelling, and a job pointed at a runner that does
+#: not exist waits for one indefinitely, which is the same outcome as the
+#: missing fork fallback this change exists to fix.
+CI_UBICLOUD_LABEL: str = "ubicloud-standard-2"
+
+#: The GitHub-hosted label a fork's pull request falls back to.
+CI_FORK_LABEL: str = "ubuntu-latest"
+
+#: The short-circuit idiom GitHub Actions expressions use in place of a
+#: ternary, read as a condition and its two arms. The arms are read by
+#: position: an expression that sends a fork to the paid runner names
+#: exactly the same two labels as one that does not, so a contract
+#: comparing label sets accepts both.
+RUNNER_TERNARY: re.Pattern[str] = re.compile(
+    r"^\s*\$\{\{\s*(?P<condition>.+)\s*&&\s*'(?P<when_true>[^']*)'"
+    r"\s*\|\|\s*'(?P<when_false>[^']*)'\s*\}\}\s*$",
+    re.DOTALL,
 )
-#: The release jobs that run on a GitHub-hosted label today. Four of them
-#: are movable tag lanes and are deliberately not moved here; the two
-#: matrix legs are absent because their labels come from dylint.toml.
-HOSTED_RELEASE_JOBS = frozenset({"prepare", "create-release", "audit", "publish"})
+
+#: The release jobs that name a GitHub-hosted label literally. Four of
+#: them are movable tag lanes and are deliberately not moved here; the
+#: two remaining jobs take their labels from an expression, one from the
+#: matrix and one from a `prepare` output, and both trace back to
+#: dylint.toml.
+HOSTED_RELEASE_JOBS: frozenset[str] = frozenset(
+    {"prepare", "create-release", "audit", "publish"}
+)
+
+#: The release jobs whose runner comes from an expression rather than a
+#: literal. Named so the release contract accounts for every job rather
+#: than only those it recognises: a job added with an unrecognised label
+#: would otherwise fall into neither set and be asserted about by
+#: nothing.
+DERIVED_RELEASE_JOBS: frozenset[str] = frozenset({"build", "verify-upstream"})
+
+
+def permitted_hosted_labels(config: Config) -> frozenset[str]:
+    """Return the GitHub-hosted labels this repository permits.
+
+    Read from `dylint.toml` rather than written down, because that file
+    is where a runner label is decided: the two cross-compilation
+    targets name theirs, and the upstream verification lane names one
+    more. The fork fallback's label is the only one this repository uses
+    that the configuration has no opinion about, and it is added by name.
+
+    Listing GitHub's catalogue instead would make the release contract
+    weaker rather than stronger. That contract asserts which jobs sit on
+    a hosted label, so every extra label in the set is a label a new job
+    could take without the assertion noticing.
+    """
+    from_config = {target.runner for target in config.targets}
+    from_config.add(config.upstream.runner)
+    return frozenset(from_config | {CI_FORK_LABEL})
+
 
 # Upstream's asset names, from the release this repository mirrors. The
 # archives published here must be indistinguishable in shape from these.
@@ -631,7 +673,7 @@ def test_no_runner_selection_hides_a_line_break(
 
 
 def test_every_ci_lane_falls_back_to_a_hosted_runner_for_a_fork(
-    ci: dict[str, Any],
+    ci: dict[str, Any], config: Config
 ) -> None:
     """A fork's pull request lands on a GitHub-hosted runner.
 
@@ -646,26 +688,46 @@ def test_every_ci_lane_falls_back_to_a_hosted_runner_for_a_fork(
     expression: ``head.repo.private`` reads almost the same and would
     send every private-repository pull request to a hosted runner.
 
-    Mutations: replacing ``head.repo.fork`` with ``head.repo.private``
-    failed this contract, and so did restoring a bare
-    ``ubicloud-standard-2``.
+    Each arm is asserted for what it is rather than for what it is not.
+    "Some hosted label and some other label" is satisfied by the two
+    declarations this contract must tell apart: the one with its arms
+    swapped, which sends a fork to the paid runner, and the one whose
+    paid label is misspelled, which sends everything else to a runner
+    that does not exist. Both wait for a runner indefinitely, which is
+    the failure this change exists to remove.
+
+    Mutations: ``head.repo.fork`` for ``head.repo.private``, a bare
+    ``ubicloud-standard-2``, the two arms swapped, and
+    ``ubicloud-standard-two`` for the paid label each failed this.
     """
+    hosted = permitted_hosted_labels(config)
     for job, spec in jobs_of(ci).items():
         declaration = str(spec.get("runs-on", ""))
-        assert FORK_FIELD in declaration, (
+        match = RUNNER_TERNARY.match(declaration)
+
+        assert match is not None, (
+            f"ci.yml:{job} does not select its runner by a condition and two "
+            f"arms, so a fork's pull request cannot be sent elsewhere: "
+            f"{declaration!r}"
+        )
+        assert FORK_FIELD in match.group("condition"), (
             f"ci.yml:{job} must key its runner on {FORK_FIELD} so a fork's "
-            f"pull request can run it: {declaration!r}"
+            f"pull request can run it: {match.group('condition')!r}"
         )
-        arms = set(RUNNER_ARM.findall(declaration))
-        assert arms & GITHUB_HOSTED_LABELS, (
-            f"ci.yml:{job} names no GitHub-hosted arm: {sorted(arms)}"
+        assert match.group("when_true") in hosted, (
+            f"ci.yml:{job} sends a fork's pull request to "
+            f"{match.group('when_true')!r}, which is not a GitHub-hosted "
+            f"label this repository uses, so the job is never scheduled"
         )
-        assert arms - GITHUB_HOSTED_LABELS, (
-            f"ci.yml:{job} names no Ubicloud arm: {sorted(arms)}"
+        assert match.group("when_false") == CI_UBICLOUD_LABEL, (
+            f"ci.yml:{job} sends its own pull requests to "
+            f"{match.group('when_false')!r} rather than {CI_UBICLOUD_LABEL!r}"
         )
 
 
-def test_the_release_lanes_stay_where_they_are(release: dict[str, Any]) -> None:
+def test_the_release_lanes_stay_where_they_are(
+    release: dict[str, Any], config: Config
+) -> None:
     """The release workflow is untouched by this change, and says so.
 
     Tag lanes are movable under the placement rule and four of these six
@@ -675,21 +737,45 @@ def test_the_release_lanes_stay_where_they_are(release: dict[str, Any]) -> None:
     the release lane has to edit this list, which is where the decision
     gets recorded.
 
-    The two matrix legs are not in the list because they must never move.
-    They exist to build the Apple and Windows targets upstream omits, and
-    their labels come from ``dylint.toml`` rather than from this file.
+    The two remaining jobs take their label from an expression, one from
+    the matrix and one from a ``prepare`` output, and both trace back to
+    ``dylint.toml``. They must never move: they exist to build the Apple
+    and Windows targets upstream omits.
 
-    Mutation: putting an Ubicloud label on ``prepare`` failed this
-    contract.
+    Every job is accounted for, by partitioning on whether the label is
+    a literal rather than by collecting the ones already recognised. An
+    earlier form gathered the jobs whose label was in the permitted set
+    and compared that with the list, so a job added on an unrecognised
+    label fell into neither side and the equality passed with the new
+    job asserted about by nothing.
+
+    Mutations: putting an Ubicloud label on ``prepare``, and adding a
+    job on a label this repository does not use, each failed this.
     """
-    hosted = {
-        job
-        for job, spec in jobs_of(release).items()
-        if str(spec.get("runs-on", "")) in GITHUB_HOSTED_LABELS
-    }
+    permitted = permitted_hosted_labels(config)
+    literal: dict[str, str] = {}
+    derived: set[str] = set()
+    for job, spec in jobs_of(release).items():
+        declaration = str(spec.get("runs-on", ""))
+        if "${{" in declaration:
+            derived.add(job)
+        else:
+            literal[job] = declaration
 
-    assert hosted == HOSTED_RELEASE_JOBS, (
-        f"release.yml's GitHub-hosted jobs changed: {sorted(hosted)} against "
-        f"{sorted(HOSTED_RELEASE_JOBS)}. Moving one is a placement decision "
-        "and belongs in a change of its own."
+    assert set(literal) == HOSTED_RELEASE_JOBS, (
+        f"release.yml's jobs on a literal label changed: {sorted(literal)} "
+        f"against {sorted(HOSTED_RELEASE_JOBS)}. Moving one is a placement "
+        "decision and belongs in a change of its own."
+    )
+    assert derived == DERIVED_RELEASE_JOBS, (
+        f"release.yml's jobs taking their runner from an expression changed: "
+        f"{sorted(derived)} against {sorted(DERIVED_RELEASE_JOBS)}"
+    )
+    unpermitted = {
+        job: label for job, label in literal.items() if label not in permitted
+    }
+    assert not unpermitted, (
+        f"release.yml names runner labels this repository does not permit: "
+        f"{unpermitted}. The permitted set comes from dylint.toml; a new one "
+        "is a placement decision and belongs in a change of its own."
     )
