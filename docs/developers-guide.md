@@ -103,6 +103,42 @@ story.
    here. If it has, remove it; the configuration refuses the overlap anyway.
 5. `make all`, commit, merge, then push `vX.Y.Z+build.1`.
 
+## Where CI runs
+
+The two `ci.yml` jobs select their runner by expression rather than by a label:
+
+```yaml
+runs-on: >-
+  ${{ github.event.pull_request.head.repo.fork
+  && 'ubuntu-latest' || 'ubicloud-standard-2' }}
+```
+
+| Event                               | Runner                |
+| :---------------------------------- | :-------------------- |
+| A pull request from a fork          | `ubuntu-latest`       |
+| A pull request from this repository | `ubicloud-standard-2` |
+| A `workflow_dispatch`               | `ubicloud-standard-2` |
+
+A fork cannot obtain an Ubicloud runner, so a bare Ubicloud label leaves the
+job unschedulable and the pull request waiting on a check that never starts.
+This repository is public, so that is not a hypothetical.
+
+The last row is the one worth stating. A dispatch sets no `pull_request`
+context at all, so the field is absent rather than false; a missing property is
+falsy in a GitHub Actions expression, so it takes the Ubicloud arm.
+
+Keep the continuation at the opening line's indent. A more-indented
+continuation in a folded scalar keeps its line break, which puts a newline
+inside the expression. GitHub evaluates the broken value anyway and the job
+still lands on the right runner, so a green run is no evidence that it is
+written correctly; a contract reads the parsed document instead.
+
+The release workflow's placement is unchanged and is pinned by contract. Four
+tag lanes name a GitHub-hosted label outright, `build` takes its label from the
+matrix and `verify-upstream` from a `prepare` output, and both of those trace
+back to `dylint.toml`. Moving any of them is a placement decision and belongs
+in a change of its own.
+
 ## The workflow contracts
 
 `tests/test_workflow_contracts.py` asserts the mechanisms the release relies

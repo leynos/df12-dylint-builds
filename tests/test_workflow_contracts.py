@@ -65,6 +65,52 @@ HOSTED_RELEASE_JOBS: frozenset[str] = frozenset(
 DERIVED_RELEASE_JOBS: frozenset[str] = frozenset({"build", "verify-upstream"})
 
 
+def select_runner(declaration: str, *, fork: bool | None) -> str:
+    """Return the label GitHub selects, given the fork field's value.
+
+    Evaluates the declaration rather than inspecting it. Reading the
+    arms by position tells you which label sits where; it does not tell
+    you which one an event actually gets, and the three events this
+    repository sees are a fork's pull request, its own pull request and
+    a dispatch. The last two do not set the field at all.
+
+    A missing property is falsy in a GitHub Actions expression, so an
+    absent field takes the same arm as an explicit false. That is why
+    ``None`` is a value here rather than an error.
+
+    Only the shape this repository uses is modelled: a condition that is
+    exactly the fork field. Anything else raises, because a contract
+    that needs to know which arm an event takes must be able to tell
+    that it cannot, rather than receive a label chosen by position in a
+    shape this function does not understand.
+
+    Parameters
+    ----------
+    declaration:
+        A job's ``runs-on`` value.
+    fork:
+        The value of ``github.event.pull_request.head.repo.fork``, or
+        None when the event does not set it.
+
+    Returns
+    -------
+    str
+        The label the job lands on.
+
+    Raises
+    ------
+    AssertionError
+        If the declaration is not the fork-keyed short-circuit form.
+    """
+    match = RUNNER_TERNARY.match(declaration)
+    assert match is not None, f"not a two-armed expression: {declaration!r}"
+    condition = match.group("condition").strip()
+    assert condition == FORK_FIELD, (
+        f"this evaluator models only {FORK_FIELD}, not {condition!r}"
+    )
+    return match.group("when_true") if fork else match.group("when_false")
+
+
 def permitted_hosted_labels(config: Config) -> frozenset[str]:
     """Return the GitHub-hosted labels this repository permits.
 
@@ -722,6 +768,46 @@ def test_every_ci_lane_falls_back_to_a_hosted_runner_for_a_fork(
         assert match.group("when_false") == CI_UBICLOUD_LABEL, (
             f"ci.yml:{job} sends its own pull requests to "
             f"{match.group('when_false')!r} rather than {CI_UBICLOUD_LABEL!r}"
+        )
+
+
+@pytest.mark.parametrize(
+    ("fork", "event", "expected"),
+    [
+        pytest.param(True, "a fork's pull request", CI_FORK_LABEL, id="fork"),
+        pytest.param(
+            False, "this repository's pull request", CI_UBICLOUD_LABEL, id="same-repo"
+        ),
+        pytest.param(
+            None, "a push or a dispatch", CI_UBICLOUD_LABEL, id="field-absent"
+        ),
+    ],
+)
+def test_every_ci_lane_lands_where_the_event_requires(
+    ci: dict[str, Any], fork: bool | None, event: str, expected: str
+) -> None:
+    """Evaluating the declaration gives the right runner for each event.
+
+    The contract above reads the arms and asserts each for what it is,
+    which catches a swap and a misspelling. It still does not say what
+    an event gets, and the third case is why that matters: a push and a
+    `workflow_dispatch` set no `pull_request` context at all, so the
+    field is absent rather than false. A missing property is falsy in a
+    GitHub Actions expression, so those take the Ubicloud arm, and
+    nothing in a positional reading of the arms establishes that.
+
+    Stated over every job, and over the three events this repository
+    sees rather than the two the change was written for.
+
+    Mutations: swapping the arms fails the fork case; negating the
+    condition would fail all three, and is refused earlier by the
+    evaluator, which models only the fork field.
+    """
+    for job, spec in jobs_of(ci).items():
+        landed = select_runner(str(spec.get("runs-on", "")), fork=fork)
+
+        assert landed == expected, (
+            f"ci.yml:{job} sends {event} to {landed!r} rather than {expected!r}"
         )
 
 
