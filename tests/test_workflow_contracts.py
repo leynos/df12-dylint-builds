@@ -277,15 +277,26 @@ def test_the_audit_rechecks_every_sidecar_after_upload(
 ) -> None:
     """The published assets are downloaded again and re-verified as a set.
 
-    Mutation: dropping ``--dist audit-dist`` from the audit command failed
+    The two steps have to name the same directory, or the audit verifies
+    a directory nobody filled and passes over nothing.
+
+    Mutation: dropping ``--dist audit-dist`` from the audit command, and
+    separately pointing the download at another directory, each failed
     this contract.
     """
     audits = steps_running(release, "audit", "scripts/package.py verify")
-    assert len(audits) == 1, audits
-    assert "--dist audit-dist" in audits[0]
-    downloads = steps_running(release, "audit", "gh release download")
-    assert downloads and "for attempt in 1 2 3" in downloads[0], (
-        "asset downloads must be retried"
+    assert len(audits) == 1, (
+        f"the audit verifies in exactly one step; found {len(audits)}"
+    )
+    assert "--dist audit-dist" in audits[0], (
+        f"the audit must verify the directory it downloaded into: {audits[0]}"
+    )
+    downloads = steps_running(release, "audit", "scripts/audit_draft.py")
+    assert len(downloads) == 1, (
+        f"the audit reads the draft in exactly one step; found {len(downloads)}"
+    )
+    assert "--dir audit-dist" in downloads[0], (
+        f"the download must fill the directory the verification reads: {downloads[0]}"
     )
 
 
@@ -412,21 +423,143 @@ def test_a_published_release_is_never_rebuilt(release: dict[str, Any]) -> None:
     assert "exit 1" in guards[0]
 
 
-def test_write_permission_is_confined_to_the_jobs_that_publish(
+def test_write_permission_is_confined_to_the_jobs_that_touch_the_release(
     release: dict[str, Any],
 ) -> None:
-    """Only the jobs that touch the release carry contents: write.
+    """Only the jobs that reach the release carry contents: write.
 
-    Mutation: granting ``contents: write`` to the audit job failed this
-    contract.
+    The default is read, and the two jobs that neither create, upload to,
+    read nor publish the release keep it: `prepare` and `verify-upstream`.
+
+    Mutation: granting ``contents: write`` to the ``prepare`` job failed
+    this contract.
     """
-    assert release["permissions"] == {"contents": "read"}
+    assert release["permissions"] == {"contents": "read"}, (
+        "the workflow default must be contents: read, so that a job holding "
+        "write says so itself rather than inheriting it: "
+        f"{release['permissions']}"
+    )
     writers = {
         job
         for job, spec in jobs_of(release).items()
         if spec.get("permissions", {}).get("contents") == "write"
     }
-    assert writers == {"create-release", "build", "publish"}
+    expected_writers = {"create-release", "build", "audit", "publish"}
+    assert writers == expected_writers, (
+        "contents: write belongs to exactly the jobs that reach the release; "
+        f"{sorted(writers - expected_writers)} gained it and "
+        f"{sorted(expected_writers - writers)} lost it"
+    )
+
+
+def test_the_audit_can_see_the_draft_it_audits(release: dict[str, Any]) -> None:
+    """The audit job carries the permission a draft release requires to read.
+
+    A draft is visible only to a token with push access. With
+    ``contents: read`` the API answers "release not found" for a draft that
+    exists, so the audit fails having checked nothing; run 34208473988 lost
+    a release to exactly this. The job still only reads.
+
+    Mutation: removing the audit job's ``permissions`` block, so that it
+    inherits the workflow's ``contents: read``, failed this contract.
+    """
+    audit = jobs_of(release)["audit"]
+    assert audit.get("permissions", {}).get("contents") == "write", (
+        "the audit job cannot download a draft release without push access"
+    )
+
+
+def test_the_audits_download_is_one_command_rather_than_a_shell_loop(
+    release: dict[str, Any],
+) -> None:
+    """The step that reads the draft invokes a script and nothing else.
+
+    It used to be a `for` loop with a conditional and a `sleep`, written
+    inline in the `run` block, and that shape is why none of the audit's
+    decisions had a test: the retry, the treatment of a permanent status
+    and the refusal to write a truncated body were all buried in shell
+    that only a release could execute. They live in
+    `scripts/audit_draft.py` now, with `tests/test_audit_draft.py`
+    driving each of them against a local server.
+
+    This contract is what stops the loop coming back. It matches shell
+    control flow rather than the absence of a script name, because a
+    step can invoke the script and still grow a loop around it.
+
+    Mutation: restoring the `for attempt in 1 2 3` loop failed this
+    contract.
+    """
+    downloads = [
+        step
+        for step in steps_of(release, "audit")
+        if "scripts/audit_draft.py" in step.get("run", "")
+    ]
+    assert len(downloads) == 1, (
+        f"the audit reads the draft in exactly one step; found {len(downloads)}"
+    )
+    body = downloads[0]["run"]
+    control_flow = [
+        token
+        for token in ("for ", "while ", "if ", "&&", "||", ";", "sleep ")
+        if token in body
+    ]
+    assert not control_flow, (
+        "the step that reads the draft must be one command, so that its "
+        "decisions live where a test can drive them; found shell control "
+        f"flow {control_flow} in: {body}"
+    )
+
+
+def test_the_audits_download_is_given_the_token_the_grant_provides(
+    release: dict[str, Any],
+) -> None:
+    """The step that reads the draft receives the job's token and repository.
+
+    The permission grant is necessary and not sufficient. A job holding
+    ``contents: write`` whose download step is handed no ``GH_TOKEN``
+    fails exactly as the unprivileged run did, with the draft reported as
+    not found. Asserting the grant alone would pass with the token
+    deleted, which is the state that reproduces run 34208473988.
+
+    ``scripts/audit_draft.py`` reads neither variable from the
+    environment: it takes ``--token`` and ``--repo``. So the environment
+    half of this contract is satisfied by a step that never passes either
+    on, which fails at run time and passes here. Both halves are
+    asserted: the variables exist, and the command spends them.
+
+    ``GH_REPO`` travels with the token because the checkout persists no
+    credentials, so nothing else names the repository.
+
+    Mutation: deleting ``GH_TOKEN`` from the step's ``env``, deleting
+    ``GH_REPO``, and separately dropping ``--token "$GH_TOKEN"`` and
+    ``--repo "$GH_REPO"`` from the command, each failed this contract.
+    """
+    downloads = [
+        step
+        for step in steps_of(release, "audit")
+        if "scripts/audit_draft.py" in step.get("run", "")
+    ]
+    assert len(downloads) == 1, (
+        f"the audit reads the draft in exactly one step; found {len(downloads)}"
+    )
+    env = downloads[0].get("env", {})
+    assert env.get("GH_TOKEN") == "${{ secrets.GITHUB_TOKEN }}", (
+        "the download step must be handed the job's token, or the write "
+        f"permission never reaches the audit: {env.get('GH_TOKEN')!r}"
+    )
+    assert env.get("GH_REPO") == "${{ github.repository }}", (
+        "the download step must name the repository, since the checkout "
+        f"persists no credentials to infer it from: {env.get('GH_REPO')!r}"
+    )
+    body = downloads[0]["run"]
+    assert '--token "$GH_TOKEN"' in body, (
+        "the audit script reads no environment variable; the token must "
+        f"reach it through --token, or the grant stops at the step: {body}"
+    )
+    assert '--repo "$GH_REPO"' in body, (
+        "the audit script reads no environment variable; the repository "
+        f"must reach it through --repo: {body}"
+    )
 
 
 # --- the CI workflow --------------------------------------------------------

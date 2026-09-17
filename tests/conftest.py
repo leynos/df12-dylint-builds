@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from audit_draft_support import api  # noqa: F401 - re-exported as a fixture
 from dylint_config import Config, parse_config
 
 FIXTURE_VERSION = "6.0.4"

@@ -39,6 +39,7 @@ consecutive blank lines.
 | `scripts/matrix.py`          | Prints the build matrix, the pinned facts and validates a tag          |
 | `scripts/package.py`         | Packages, verifies and audits archives and sidecars                    |
 | `scripts/verify_upstream.py` | Downloads upstream's archives and checks them the same way             |
+| `scripts/audit_draft.py`     | Reads a draft release's assets back from GitHub for the audit          |
 | `tests/`                     | Unit tests, property tests and the workflow contracts                  |
 
 ## Errors
@@ -150,4 +151,135 @@ Triggered by a `v*` tag push. In order:
    binaries; that has already happened on each build leg.
 6. `publish` clears the draft flag.
 
-Only `create-release`, `build` and `publish` hold `contents: write`.
+### Permissions and the draft
+
+The workflow defaults to `contents: read`. Four jobs raise it to
+`contents: write`: `create-release`, `build`, `audit` and `publish`.
+
+`audit` is the surprising one because it only reads. A draft release is visible
+only to a token with push access, so with `contents: read` the API reports a
+draft that plainly exists as not found, and the audit fails having checked
+nothing. Run 34208473988 lost a release to this: both build legs succeeded and
+uploaded all twelve assets, and the audit could not see the draft holding them.
+
+A contract asserts the audit job's permission for that reason, and a second
+asserts that the set of jobs holding write is exactly those four, so the grant
+cannot spread to `prepare` or `verify-upstream`, neither of which touches the
+release.
+
+The grant is necessary and not sufficient. `gh` and this repository's own
+reader both take their credentials from the environment, so a job holding
+`contents: write` whose download step is handed no `GH_TOKEN` fails exactly as
+the unprivileged run did. A third contract therefore asserts that the step
+reading the draft carries `GH_TOKEN` and `GH_REPO`, and it is proved by
+deleting each from that step rather than from the first one in the file.
+
+### Reading the draft back
+
+`scripts/audit_draft.py` performs the read. It looks the release up by tag,
+then downloads each asset with the token, reusing `verify_upstream.download` so
+the retry, the backoff and the refusal to write a truncated body are the same
+code in both places. The lookup retries too, on the same statuses and on 404: a
+single 500 from the API otherwise failed the release outright, and the asset
+retry never ran, because there was no release to take assets from.
+
+It replaced a `for` loop with a conditional and a `sleep`, written inline in
+the workflow's `run` block, and the reason is not tidiness. Every decision in
+that step was one only a release could execute: whether a status is worth
+another attempt, what a 403 means as against a 503, whether a short body may be
+written out, and what an empty release means. `tests/test_audit_draft.py`
+drives each against a local server standing in for the API, including the 404
+that a draft returns to a token without push access, which is the failure the
+permission change exists to prevent. A contract keeps the step to a single
+command, so the loop cannot come back.
+
+Three of its decisions are worth stating outright. A 404 is reported as the
+under-privileged-token case because the API answers the same way for a release
+that does not exist and for a draft the token cannot see, and only one of those
+has ever happened here. It is nonetheless retried first: the workflow creates
+the draft in `create-release` and reads it back in `audit`, so the first read
+can precede GitHub's own consistency. An invisible draft still fails, after
+four attempts and three sleeps of 5, 10 and 15 seconds. A release carrying no
+assets is a failure rather than a clean result: an audit over an empty
+directory passes every check it is given, which is indistinguishable from
+success and is the outcome the audit exists to prevent.
+
+### What the reader is made of, and what it measures
+
+The reader is split along the line between deciding and doing, because a query
+that opens a socket cannot be exercised without one. `release_url` builds the
+lookup address and `release_from_payload` decides what a decoded body is; both
+are pure, and both are called directly in tests that inject a transport which
+fails if anything asks it to read. `release_for_tag` is the fallible boundary
+that composes them with the network. `asset_target` holds the containment rule
+for an asset name, which arrives from GitHub rather than from this repository,
+and it is public so the rule can be generated against rather than sampled by
+hand: Hypothesis draws traversal buried under real-looking directories,
+absolute names, and ordinary names that must be accepted.
+
+The transport, the sleeper between retries and the clock all travel on the
+`Api` value. A test therefore asserts the backoff schedule by reading it back
+rather than serving it out, and asserts a latency bucket without waiting for
+one.
+
+Both reads use those seams, not only the lookup. `Transport`, `Sleeper` and the
+default `urlopen_bytes` live in `scripts/verify_upstream.py`, which owns the
+downloading, and the three travel together on a `Reader` beside the retry
+policy, for the reason `Retry` groups its own pair. `download` takes one, and
+`Api.reader` composes the three the caller is holding, so an asset's retries
+are exercised against a table and a recorded schedule rather than a socket and
+a real wait. `urlopen_bytes` is the only place in either script that opens one.
+
+The reader emits metrics on standard output, one per line, prefixed
+`metric audit-draft.`. Maintainers read them in the `audit` job's log in the
+release workflow run; nothing is written anywhere else, because the script runs
+once per release and leaves nothing behind.
+
+| Metric                    | Values                                                                            |
+| ------------------------- | --------------------------------------------------------------------------------- |
+| `release-lookup.outcome`  | `ok`, `retryable-status`, `permanent-status`, `not-json`, `transport-error`       |
+| `release-lookup.attempts` | `1` to the retry policy's limit                                                   |
+| `release-lookup.latency`  | `under-1s`, `under-5s`, `under-30s`, `under-120s`, `over-120s`                    |
+| `release-payload.outcome` | `ok`, `not-a-release`                                                             |
+| `asset-download.outcome`  | `ok`, `destination-unwritable`, `no-assets`, `rejected-asset`, `asset-unreadable` |
+| `asset-download.written`  | how many assets arrived                                                           |
+| `asset-download.latency`  | as `release-lookup.latency`                                                       |
+
+Every value is drawn from a closed set or is a count, and a test asserts that
+no metric line carries the token, the API address or an asset name. Both rules
+matter: a token in a workflow log is a leak, and a raw duration or a URL as a
+metric value makes every run its own series, so the failure rate that matters
+is spread across all of them and countable in none.
+
+The lookup's outcome is reported from a `finally`, so the runs that failed are
+counted alongside the ones that succeeded. A retry rate read only from
+successes says nothing about the failures the retry did not prevent. The
+payload check is reported separately from the lookup because no retry would
+change its answer, and folding a permanent failure into the series read for
+transient ones is how a persistent defect comes to look like noise.
+
+### When a release fails
+
+Two cases, and they are not the same.
+
+If the workflow is right and a job failed for a transient reason, re-run the
+failed jobs. `create-release` resumes a draft left by an earlier run of the
+same tag, and refuses a tag that is already published, so a retry cannot alter
+what a consumer has already seen.
+
+If the workflow itself is wrong, the tag cannot be re-run. A re-run uses the
+workflow file as it was at that tag, so it will fail the same way. Fix the
+workflow, merge it, and push the next build number. **This is what the build
+number is for.** It distinguishes a repackaging of the same upstream release
+from a new upstream release, so a broken run costs a build number rather than a
+version.
+
+`v6.0.4+build.1` is the worked example. Both legs built and uploaded all twelve
+assets, the audit could not see the draft, and the fix was a change to the
+workflow. It was abandoned in favour of `v6.0.4+build.2`, and its draft release
+and tag were deleted so that the only tag in the repository is one that
+published.
+
+Never delete or re-push a tag whose release was published. Consumers pin the
+digests in its sidecars, and a published release is immutable by design; the
+draft of a failed run is the only thing that may be discarded.

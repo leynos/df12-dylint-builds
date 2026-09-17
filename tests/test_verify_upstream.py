@@ -14,7 +14,14 @@ import pytest
 from conftest import FIXTURE_COMMIT, FIXTURE_CONFIG, write_stubs
 from dylint_config import parse_config
 from package import PackagingError, pack, write_sidecar
-from verify_upstream import download, main, verify_upstream
+from verify_upstream import (
+    USER_AGENT,
+    Reader,
+    Retry,
+    download,
+    main,
+    verify_upstream,
+)
 
 UPSTREAM_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")
 
@@ -63,6 +70,22 @@ class _TruncatingHandler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *args: object) -> None:
         """Discard the access log."""
+
+
+# One shape for every stand-in server in this module. Each of the three
+# differs only in how it answers, and duplicating the start, the
+# shutdown and the join alongside that difference buried it.
+def _serving(handler: type[http.server.BaseHTTPRequestHandler]) -> Iterator[str]:
+    """Serve ``handler`` on an ephemeral port and yield its base URL."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def _serving_config(base_url: str) -> str:
@@ -192,7 +215,11 @@ def test_a_download_that_cannot_be_written_names_the_destination(
     (root / "probe.txt").write_bytes(b"probe")
     destination = tmp_path / "absent-directory" / "probe.txt"
     with pytest.raises(PackagingError, match="could not write"):
-        download(f"{base_url}/v6.0.4/probe.txt", destination, backoff=0)
+        download(
+            f"{base_url}/v6.0.4/probe.txt",
+            destination,
+            reader=Reader(retry=Retry(backoff=0)),
+        )
 
 
 def test_a_download_is_retried_before_it_fails(
@@ -200,7 +227,11 @@ def test_a_download_is_retried_before_it_fails(
 ) -> None:
     """Transient network failures are retried, and the last error is reported."""
     with pytest.raises(PackagingError, match="after 2 attempts"):
-        download("http://127.0.0.1:1/absent", tmp_path / "out", attempts=2, backoff=0)
+        download(
+            "http://127.0.0.1:1/absent",
+            tmp_path / "out",
+            reader=Reader(retry=Retry(attempts=2, backoff=0)),
+        )
     assert "attempt 1" in capsys.readouterr().out
 
 
@@ -217,15 +248,7 @@ def test_a_download_returns_the_destination(
 @pytest.fixture
 def truncating_server() -> Iterator[str]:
     """Serve responses whose bodies are shorter than their Content-Length."""
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _TruncatingHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    yield from _serving(_TruncatingHandler)
 
 
 def test_a_permanent_status_is_not_retried(
@@ -236,7 +259,11 @@ def test_a_permanent_status_is_not_retried(
     """A 404 will not become a 200, so it fails at once and says so."""
     base_url, _ = upstream_server
     with pytest.raises(PackagingError, match="HTTP 404"):
-        download(f"{base_url}/v6.0.4/absent.tar.gz", tmp_path / "out", backoff=0)
+        download(
+            f"{base_url}/v6.0.4/absent.tar.gz",
+            tmp_path / "out",
+            reader=Reader(retry=Retry(backoff=0)),
+        )
     assert "retrying" not in capsys.readouterr().out, (
         "a status that will not change must fail without a retry"
     )
@@ -248,7 +275,11 @@ def test_a_truncated_response_is_retried_and_never_written(
     """A body shorter than its Content-Length is a failure, not a short archive."""
     destination = tmp_path / "out"
     with pytest.raises(PackagingError, match="after 2 attempts"):
-        download(f"{truncating_server}/anything", destination, attempts=2, backoff=0)
+        download(
+            f"{truncating_server}/anything",
+            destination,
+            reader=Reader(retry=Retry(attempts=2, backoff=0)),
+        )
     assert not destination.exists(), "a truncated body must not be written out"
 
 
@@ -256,15 +287,7 @@ def test_a_truncated_response_is_retried_and_never_written(
 def flaky_server() -> Iterator[str]:
     """Serve one 503 per path before serving the real bytes."""
     _FlakyHandler.served = set()
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FlakyHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    yield from _serving(_FlakyHandler)
 
 
 def test_a_retryable_status_is_retried_and_then_succeeds(
@@ -276,7 +299,11 @@ def test_a_retryable_status_is_retried_and_then_succeeds(
     ``RETRYABLE_STATUSES`` test, passes every other download test. Only this
     one distinguishes a status worth retrying from one that is not.
     """
-    destination = download(f"{flaky_server}/asset.tar.gz", tmp_path / "out", backoff=0)
+    destination = download(
+        f"{flaky_server}/asset.tar.gz",
+        tmp_path / "out",
+        reader=Reader(retry=Retry(backoff=0)),
+    )
     assert destination.read_bytes() == _FlakyHandler.payload, (
         "the retry must write the body of the attempt that succeeded"
     )
@@ -333,3 +360,84 @@ def test_the_command_line_reports_an_unreadable_configuration(
     assert "error: " in capsys.readouterr().err, (
         "a configuration failure must be reported on stderr"
     )
+
+
+class _HeaderRecordingHandler(http.server.BaseHTTPRequestHandler):
+    """Serve a fixed body and record the headers each request carried."""
+
+    #: Every request's headers, lower-cased, in order. Lower-cased
+    #: because `urllib` capitalizes header names when it builds a
+    #: request, so a lookup by the documented spelling would miss.
+    seen: typing.ClassVar[list[dict[str, str]]] = []
+
+    def do_GET(self) -> None:
+        """Record the headers, then answer with the body."""
+        self.seen.append({k.lower(): v for k, v in self.headers.items()})
+        body = b"the bytes"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args: object) -> None:
+        """Discard the access log."""
+
+
+@pytest.fixture
+def header_server() -> Iterator[str]:
+    """Serve a body from a local server that records request headers."""
+    _HeaderRecordingHandler.seen = []
+    yield from _serving(_HeaderRecordingHandler)
+
+
+def test_supplied_headers_are_sent_alongside_the_default_user_agent(
+    header_server: str, tmp_path: Path
+) -> None:
+    """Extra headers are merged over the default, not substituted for it.
+
+    This is how the draft-release reader passes its token through the
+    same retrying downloader a public archive uses. Replacing the
+    header set rather than merging into it would drop the user agent
+    that GitHub attributes the reads to, and nothing else would notice.
+    """
+    download(
+        f"{header_server}/asset",
+        tmp_path / "asset",
+        reader=Reader(retry=Retry(attempts=1, backoff=0)),
+        headers={"Authorization": "Bearer a-token"},
+    )
+
+    sent = _HeaderRecordingHandler.seen[0]
+    assert sent.get("authorization") == "Bearer a-token", sent
+    assert sent.get("user-agent") == USER_AGENT, sent
+
+
+def test_a_supplied_user_agent_replaces_the_default(
+    header_server: str, tmp_path: Path
+) -> None:
+    """The merge is one-directional, so a caller can still override.
+
+    Asserted because the merge order is the whole content of the change
+    and both orders send the token; only this distinguishes them.
+    """
+    download(
+        f"{header_server}/asset",
+        tmp_path / "asset",
+        reader=Reader(retry=Retry(attempts=1, backoff=0)),
+        headers={"User-Agent": "something-else"},
+    )
+
+    assert _HeaderRecordingHandler.seen[0].get("user-agent") == "something-else"
+
+
+def test_a_download_with_no_headers_still_names_this_tool(
+    header_server: str, tmp_path: Path
+) -> None:
+    """The default survives the parameter being added."""
+    download(
+        f"{header_server}/asset",
+        tmp_path / "asset",
+        reader=Reader(retry=Retry(attempts=1, backoff=0)),
+    )
+
+    assert _HeaderRecordingHandler.seen[0].get("user-agent") == USER_AGENT
