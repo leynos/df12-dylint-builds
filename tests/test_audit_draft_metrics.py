@@ -343,6 +343,26 @@ class TestTheAssetOutcomeSaysWhichFailure:
         found = _metrics(capsys.readouterr().out)
         assert found["asset-download.outcome"] == Outcome.DESTINATION_UNWRITABLE, found
 
+    def test_an_asset_name_the_path_layer_refuses_is_a_rejected_asset(
+        self, api: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A name the path layer will not take is not a transport fault.
+
+        The name comes from the release, so it reaches `Path.resolve`
+        unvetted while the containment rule decides whether it stays
+        inside the download directory. A NUL byte makes that raise
+        `ValueError`, which is neither a `PackagingError` nor an
+        `OSError`, so it escaped the command's boundary entirely: a
+        traceback, no annotation, and no outcome reported.
+        """
+        release = {"assets": [{"name": "a\x00b.tar.gz", "url": f"{api}/x"}]}
+
+        with pytest.raises(PackagingError):
+            download_assets(release, tmp_path / "dist", api_for(api))
+
+        found = _metrics(capsys.readouterr().out)
+        assert found["asset-download.outcome"] == Outcome.REJECTED_ASSET, found
+
     def test_an_entry_that_is_not_an_asset_is_a_rejected_asset(
         self, api: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

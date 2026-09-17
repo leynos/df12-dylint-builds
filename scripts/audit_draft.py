@@ -34,6 +34,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
+from audit_draft_paths import asset_target, make_destination
 from package import PackagingError
 from verify_upstream import (
     DEFAULT_RETRY,
@@ -721,97 +722,6 @@ def assets_of(release: ReleasePayload) -> list[AssetPayload]:
     return [as_asset(entry) for entry in asset_entries(release)]
 
 
-def _required_text(asset: AssetPayload, field: str) -> str:
-    """Return one string field of an asset, insisting it is present.
-
-    Parameters
-    ----------
-    asset:
-        The asset object.
-    field:
-        The field to read.
-
-    Returns
-    -------
-    str
-        The value.
-
-    Raises
-    ------
-    PackagingError
-        If the field is absent, empty, or not a string.
-    """
-    value = asset.get(field)
-    if not isinstance(value, str) or not value:
-        message = f"an asset of this release has no {field}: {asset!r}"
-        raise PackagingError(message)
-    return value
-
-
-def asset_target(asset: AssetPayload, destination: Path) -> tuple[str, Path]:
-    """Return one asset's download URL and where it may be written.
-
-    The name comes from the release rather than from this repository, so
-    it is not trusted to stay inside the directory. Public because this
-    containment rule is the one decision here that a caller cannot
-    inspect its input for beforehand, and it is worth being able to
-    generate names against it rather than list them.
-
-    Parameters
-    ----------
-    asset:
-        The asset object.
-    destination:
-        The directory being filled.
-
-    Returns
-    -------
-    tuple[str, Path]
-        The URL to read, and the path to write.
-
-    Raises
-    ------
-    PackagingError
-        If the asset lacks a name or a URL, or the name would escape.
-    """
-    name = _required_text(asset, "name")
-    url = _required_text(asset, "url")
-    target = (destination / name).resolve()
-    if not target.is_relative_to(destination.resolve()):
-        message = f"asset name {name!r} would write outside {destination}"
-        raise PackagingError(message)
-    return url, target
-
-
-def _make_destination(destination: Path) -> None:
-    """Create the download directory, as this command's own failure.
-
-    Inside the error boundary rather than before it, and translated
-    rather than allowed to escape. `main` catches `PackagingError` and
-    nothing else, so an `OSError` here left the command with a traceback
-    instead of the `::error::` annotation a workflow log needs, and the
-    `finally` below never ran, so the run reported no outcome at all.
-
-    Parameters
-    ----------
-    destination:
-        The directory to write into.
-
-    Raises
-    ------
-    PackagingError
-        If the directory cannot be created.
-    """
-    try:
-        destination.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
-        message = (
-            f"the download directory {destination} could not be created: "
-            f"{type(error).__name__}: {error}"
-        )
-        raise PackagingError(message) from error
-
-
 def download_assets(release: ReleasePayload, destination: Path, api: Api) -> list[Path]:
     """Download every asset of ``release`` into ``destination``.
 
@@ -847,7 +757,7 @@ def download_assets(release: ReleasePayload, destination: Path, api: Api) -> lis
     # reconstructed afterwards.
     stage = Outcome.DESTINATION_UNWRITABLE
     try:
-        _make_destination(destination)
+        make_destination(destination)
         stage = Outcome.NO_ASSETS
         # The list and the entries are read separately, because they are
         # different outcomes. `asset_entries` raises while the stage is
