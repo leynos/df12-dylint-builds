@@ -59,7 +59,7 @@ HOSTED_RELEASE_JOBS: frozenset[str] = frozenset(
 
 #: The release jobs whose runner comes from an expression rather than a
 #: literal. Named so the release contract accounts for every job rather
-#: than only those it recognises: a job added with an unrecognised label
+#: than only those it recognizes: a job added with an unrecognized label
 #: would otherwise fall into neither set and be asserted about by
 #: nothing.
 DERIVED_RELEASE_JOBS: frozenset[str] = frozenset({"build", "verify-upstream"})
@@ -86,9 +86,9 @@ def select_runner(declaration: str, *, fork: bool | None) -> str:
 
     Parameters
     ----------
-    declaration:
+    declaration : str
         A job's ``runs-on`` value.
-    fork:
+    fork : bool or None
         The value of ``github.event.pull_request.head.repo.fork``, or
         None when the event does not set it.
 
@@ -124,6 +124,23 @@ def permitted_hosted_labels(config: Config) -> frozenset[str]:
     weaker rather than stronger. That contract asserts which jobs sit on
     a hosted label, so every extra label in the set is a label a new job
     could take without the assertion noticing.
+
+    Parameters
+    ----------
+    config : Config
+        The parsed ``dylint.toml``.
+
+    Returns
+    -------
+    frozenset[str]
+        Every GitHub-hosted label this repository permits.
+
+    Examples
+    --------
+    >>> "ubuntu-latest" in permitted_hosted_labels(  # doctest: +SKIP
+    ...     load_config(default_config_path())
+    ... )
+    True
     """
     from_config = {target.runner for target in config.targets}
     from_config.add(config.upstream.runner)
@@ -829,9 +846,9 @@ def test_the_release_lanes_stay_where_they_are(
     and Windows targets upstream omits.
 
     Every job is accounted for, by partitioning on whether the label is
-    a literal rather than by collecting the ones already recognised. An
+    a literal rather than by collecting the ones already recognized. An
     earlier form gathered the jobs whose label was in the permitted set
-    and compared that with the list, so a job added on an unrecognised
+    and compared that with the list, so a job added on an unrecognized
     label fell into neither side and the equality passed with the new
     job asserted about by nothing.
 
