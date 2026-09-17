@@ -10,6 +10,7 @@ than serving it out.
 
 from __future__ import annotations
 
+import email.message
 import json
 import typing
 import urllib.error
@@ -214,7 +215,9 @@ class _FailingThenAnsweringTransport:
         self.urls.append(url)
         if self.remaining:
             self.remaining -= 1
-            raise urllib.error.HTTPError(url, 503, "busy", {}, None)  # type: ignore[arg-type]
+            raise urllib.error.HTTPError(
+                url, 503, "busy", email.message.Message(), None
+            )
         return self.body
 
 

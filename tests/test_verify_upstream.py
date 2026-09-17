@@ -72,23 +72,11 @@ class _TruncatingHandler(http.server.BaseHTTPRequestHandler):
         """Discard the access log."""
 
 
+# One shape for every stand-in server in this module. Each of the three
+# differs only in how it answers, and duplicating the start, the
+# shutdown and the join alongside that difference buried it.
 def _serving(handler: type[http.server.BaseHTTPRequestHandler]) -> Iterator[str]:
-    """Serve ``handler`` on an ephemeral port and yield its base URL.
-
-    One shape for every stand-in server in this module. Each of the
-    three differs only in how it answers, and duplicating the start,
-    the shutdown and the join alongside that difference buried it.
-
-    Parameters
-    ----------
-    handler:
-        What answers each request.
-
-    Yields
-    ------
-    str
-        The server's base URL.
-    """
+    """Serve ``handler`` on an ephemeral port and yield its base URL."""
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -378,7 +366,7 @@ class _HeaderRecordingHandler(http.server.BaseHTTPRequestHandler):
     """Serve a fixed body and record the headers each request carried."""
 
     #: Every request's headers, lower-cased, in order. Lower-cased
-    #: because `urllib` capitalises header names when it builds a
+    #: because `urllib` capitalizes header names when it builds a
     #: request, so a lookup by the documented spelling would miss.
     seen: typing.ClassVar[list[dict[str, str]]] = []
 

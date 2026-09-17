@@ -342,7 +342,7 @@ class TestAnAssetFieldThatIsNotUsable:
 
     `_required_text` refuses an absent, empty or non-string field, and
     each of the three is a different way for GitHub's payload to be
-    unusable. Parametrised over both fields, because the rule is about
+    unusable. Parameterized over both fields, because the rule is about
     the field's value and a test naming only `name` would leave `url`
     proved by inspection.
     """

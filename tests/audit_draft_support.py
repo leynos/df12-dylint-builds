@@ -95,7 +95,7 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
         bearing in every test, instead of only in the ones that name it.
         """
         is_release = "/releases/tags/" in self.path
-        # Lower-cased keys: `urllib` capitalises header names when it
+        # Lower-cased keys: `urllib` capitalizes header names when it
         # builds a request, so it sends `X-github-api-version`. HTTP
         # header names are case-insensitive and `self.headers` honours
         # that, but a plain `dict` of it does not, and a lookup by the

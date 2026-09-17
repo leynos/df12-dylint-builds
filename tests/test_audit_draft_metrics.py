@@ -9,7 +9,7 @@ address as a label makes every run its own series.
 
 from __future__ import annotations
 
-import typing
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -65,7 +65,7 @@ class _BadBytesTransport:
         """Answer every read with ``body``."""
         self.body = body
 
-    def __call__(self, url: str, headers: typing.Mapping[str, str]) -> bytes:
+    def __call__(self, url: str, headers: Mapping[str, str]) -> bytes:
         """Return the undecodable body, ignoring what was asked for."""
         del url, headers
         return self.body
@@ -322,6 +322,22 @@ class TestTheAssetOutcomeSaysWhichFailure:
 
         found = _metrics(capsys.readouterr().out)
         assert found["asset-download.outcome"] == Outcome.NO_ASSETS, found
+
+    def test_an_entry_that_is_not_an_asset_is_a_rejected_asset(
+        self, api: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A list holding something else is not an empty list.
+
+        The release lists one entry, so the audit has something to read
+        and finds it unusable. Reporting `no-assets` would say the
+        release was empty, which sends a maintainer to the upload step
+        rather than to the entry that is wrong.
+        """
+        with pytest.raises(PackagingError):
+            download_assets({"assets": ["a.tar.gz"]}, tmp_path / "dist", api_for(api))
+
+        found = _metrics(capsys.readouterr().out)
+        assert found["asset-download.outcome"] == Outcome.REJECTED_ASSET, found
 
     def test_an_escaping_asset_name_reports_itself(
         self, api: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]

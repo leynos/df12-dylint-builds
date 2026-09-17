@@ -241,7 +241,7 @@ once per release and leaves nothing behind.
 | `release-lookup.attempts` | `1` to the retry policy's limit                                             |
 | `release-lookup.latency`  | `under-1s`, `under-5s`, `under-30s`, `under-120s`, `over-120s`              |
 | `release-payload.outcome` | `ok`, `not-a-release`                                                       |
-| `asset-download.outcome`  | as `release-lookup.outcome`                                                 |
+| `asset-download.outcome`  | `ok`, `no-assets`, `rejected-asset`, `asset-unreadable`                     |
 | `asset-download.written`  | how many assets arrived                                                     |
 | `asset-download.latency`  | as `release-lookup.latency`                                                 |
 

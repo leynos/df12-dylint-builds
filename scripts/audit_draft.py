@@ -620,6 +620,81 @@ def release_for_tag(repo: str, tag: str, api: Api) -> ReleasePayload:
     return release
 
 
+def asset_entries(release: ReleasePayload) -> list[object]:
+    """Return the release's asset list, insisting it holds something.
+
+    Asks only about the list. Whether each entry is an asset is
+    `as_asset`'s question, and the two are separated because the
+    download reports them as different outcomes: an empty release is the
+    audit's own failure mode, and an unusable entry is a fault in what
+    the release lists. Validating both here reported the second as the
+    first, because the download's stage was still `no-assets` when this
+    raised.
+
+    Parameters
+    ----------
+    release:
+        The release object.
+
+    Returns
+    -------
+    list[object]
+        The entries, unvalidated, in the order the release lists them.
+
+    Raises
+    ------
+    PackagingError
+        If the assets are missing, not a list, or empty. An empty draft
+        is reported rather than accepted: the audit's whole purpose is
+        to read back what was uploaded, and finding nothing is the
+        result it must never treat as a clean sheet.
+    """
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        message = "the release carries no asset list, so nothing can be audited"
+        raise PackagingError(message)
+    if not assets:
+        message = (
+            "the release carries no assets. An audit over an empty directory "
+            "passes every check it is given, so this is a failure rather than "
+            "a clean result"
+        )
+        raise PackagingError(message)
+    return assets
+
+
+def as_asset(entry: object) -> AssetPayload:
+    """Return ``entry`` as an asset object, insisting it is one.
+
+    Checked here rather than left to the field reads: an entry that is
+    not an object reaches `_required_text` as whatever it is and fails
+    with an AttributeError, which names neither the release nor the
+    entry. This is also what makes `assets_of`'s annotation true.
+
+    Parameters
+    ----------
+    entry:
+        One member of the release's asset list.
+
+    Returns
+    -------
+    AssetPayload
+        The entry, as an object.
+
+    Raises
+    ------
+    PackagingError
+        If the entry is not an object.
+    """
+    if not isinstance(entry, dict):
+        message = (
+            f"the release lists {type(entry).__name__} where an asset "
+            f"object belongs: {entry!r}"
+        )
+        raise PackagingError(message)
+    return entry
+
+
 def assets_of(release: ReleasePayload) -> list[AssetPayload]:
     """Return the release's assets, insisting there is at least one.
 
@@ -636,34 +711,9 @@ def assets_of(release: ReleasePayload) -> list[AssetPayload]:
     Raises
     ------
     PackagingError
-        If the assets are missing, not a list, empty, or not objects. An
-        empty draft is reported rather than accepted: the audit's whole
-        purpose is to read back what was uploaded, and finding nothing
-        is the result it must never treat as a clean sheet.
+        If the assets are missing, not a list, empty, or not objects.
     """
-    assets = release.get("assets")
-    if not isinstance(assets, list):
-        message = "the release carries no asset list, so nothing can be audited"
-        raise PackagingError(message)
-    if not assets:
-        message = (
-            "the release carries no assets. An audit over an empty directory "
-            "passes every check it is given, so this is a failure rather than "
-            "a clean result"
-        )
-        raise PackagingError(message)
-    # Checked here rather than left to the field reads: an entry that is
-    # not an object reaches `_required_text` as whatever it is and fails
-    # with an AttributeError, which names neither the release nor the
-    # entry. This is also what makes the return annotation true.
-    for entry in assets:
-        if not isinstance(entry, dict):
-            message = (
-                f"the release lists {type(entry).__name__} where an asset "
-                f"object belongs: {entry!r}"
-            )
-            raise PackagingError(message)
-    return assets
+    return [as_asset(entry) for entry in asset_entries(release)]
 
 
 def _required_text(asset: AssetPayload, field: str) -> str:
@@ -763,9 +813,14 @@ def download_assets(release: ReleasePayload, destination: Path, api: Api) -> lis
     # reconstructed afterwards.
     stage = Outcome.NO_ASSETS
     try:
-        for asset in assets_of(release):
+        # The list and the entries are read separately, because they are
+        # different outcomes. `asset_entries` raises while the stage is
+        # still `no-assets`, which is what an absent or empty list is;
+        # an entry that is not an asset is rejected inside the loop,
+        # where the stage says so.
+        for entry in asset_entries(release):
             stage = Outcome.REJECTED_ASSET
-            url, target = asset_target(asset, destination)
+            url, target = asset_target(as_asset(entry), destination)
             stage = Outcome.ASSET_UNREADABLE
             download(url, target, headers=headers, reader=api.reader)
             written.append(target)
