@@ -283,6 +283,45 @@ class TestTheCommandLine:
             "the failure must name the permission it needs"
         )
 
+    def test_an_uncreatable_directory_exits_one(
+        self, api: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A destination that cannot be made fails the step, not the process.
+
+        `main` catches `PackagingError` and nothing else, so while the
+        directory was created outside the error boundary an `OSError`
+        here left a traceback and no `::error::` annotation, which is
+        the one thing a workflow log reads.
+        """
+        blocked = tmp_path / "a-file"
+        blocked.write_text("not a directory", encoding="utf-8")
+
+        code = main(
+            [
+                "--repo",
+                REPO,
+                "--tag",
+                TAG,
+                "--token",
+                TOKEN,
+                "--dir",
+                str(blocked / "dist"),
+                "--api",
+                api,
+                "--retry-backoff",
+                "0",
+            ]
+        )
+
+        assert code == 1, "an uncreatable destination must fail the step"
+        captured = capsys.readouterr().err
+        assert "::error::" in captured, (
+            "the failure must reach the workflow log as an annotation"
+        )
+        assert str(blocked / "dist") in captured, (
+            "the failure must name the directory it could not create"
+        )
+
 
 class TestAResponseThatIsNotARelease:
     """A body that does not decode fails the step rather than the audit.

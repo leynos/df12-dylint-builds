@@ -323,6 +323,26 @@ class TestTheAssetOutcomeSaysWhichFailure:
         found = _metrics(capsys.readouterr().out)
         assert found["asset-download.outcome"] == Outcome.NO_ASSETS, found
 
+    def test_an_uncreatable_destination_says_so(
+        self, api: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A directory that cannot be made is not a connection fault.
+
+        Nothing is wrong with the release, the connection or the assets,
+        and no retry or re-release would change it, so it carries its
+        own value rather than the one the next step would have reported.
+        """
+        blocked = tmp_path / "a-file"
+        blocked.write_text("not a directory", encoding="utf-8")
+
+        with pytest.raises(PackagingError):
+            download_assets(
+                release_body(api, "a.tar.gz"), blocked / "dist", api_for(api)
+            )
+
+        found = _metrics(capsys.readouterr().out)
+        assert found["asset-download.outcome"] == Outcome.DESTINATION_UNWRITABLE, found
+
     def test_an_entry_that_is_not_an_asset_is_a_rejected_asset(
         self, api: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

@@ -247,6 +247,11 @@ class Outcome(enum.StrEnum):
     REJECTED_ASSET = "rejected-asset"
     #: An asset was listed and could not be fetched.
     ASSET_UNREADABLE = "asset-unreadable"
+    #: The download directory could not be created. Distinct from every
+    #: value above because the remedy is: nothing was wrong with the
+    #: release, the connection or the assets, and no retry or re-release
+    #: would change it.
+    DESTINATION_UNWRITABLE = "destination-unwritable"
 
 
 #: The latency buckets a duration is reported in, as an upper bound and
@@ -778,6 +783,35 @@ def asset_target(asset: AssetPayload, destination: Path) -> tuple[str, Path]:
     return url, target
 
 
+def _make_destination(destination: Path) -> None:
+    """Create the download directory, as this command's own failure.
+
+    Inside the error boundary rather than before it, and translated
+    rather than allowed to escape. `main` catches `PackagingError` and
+    nothing else, so an `OSError` here left the command with a traceback
+    instead of the `::error::` annotation a workflow log needs, and the
+    `finally` below never ran, so the run reported no outcome at all.
+
+    Parameters
+    ----------
+    destination:
+        The directory to write into.
+
+    Raises
+    ------
+    PackagingError
+        If the directory cannot be created.
+    """
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        message = (
+            f"the download directory {destination} could not be created: "
+            f"{type(error).__name__}: {error}"
+        )
+        raise PackagingError(message) from error
+
+
 def download_assets(release: ReleasePayload, destination: Path, api: Api) -> list[Path]:
     """Download every asset of ``release`` into ``destination``.
 
@@ -798,9 +832,9 @@ def download_assets(release: ReleasePayload, destination: Path, api: Api) -> lis
     Raises
     ------
     PackagingError
-        If an asset is unusable, or a download fails.
+        If the destination cannot be created, an asset is unusable, or a
+        download fails.
     """
-    destination.mkdir(parents=True, exist_ok=True)
     headers = _headers(api.token, accept="application/octet-stream")
     written: list[Path] = []
     started = api.clock()
@@ -811,8 +845,10 @@ def download_assets(release: ReleasePayload, destination: Path, api: Api) -> lis
     # three faults, three remedies, one label. The stage is what tells
     # them apart, so it is recorded as it is reached rather than
     # reconstructed afterwards.
-    stage = Outcome.NO_ASSETS
+    stage = Outcome.DESTINATION_UNWRITABLE
     try:
+        _make_destination(destination)
+        stage = Outcome.NO_ASSETS
         # The list and the entries are read separately, because they are
         # different outcomes. `asset_entries` raises while the stage is
         # still `no-assets`, which is what an absent or empty list is;
