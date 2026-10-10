@@ -2,13 +2,13 @@
 
 ## Prerequisites
 
-| Tool                | Version            | Why                                               |
-| ------------------- | ------------------ | ------------------------------------------------- |
-| Python              | 3.12 or newer      | `scripts/` targets 3.12; the gates run on 3.13    |
-| `uv`                | any recent release | runs the tests and Ruff in throwaway environments |
-| `make`              | any                | the gates are Makefile targets                    |
-| `markdownlint-cli2` | 0.20 or newer      | the Markdown gate                                 |
-| Ruff                | 0.15.12            | pinned in the Makefile as `RUFF_VERSION`          |
+| Tool                | Version            | Why                                            |
+| ------------------- | ------------------ | ---------------------------------------------- |
+| Python              | 3.12 or newer      | `scripts/` targets 3.12; the gates run on 3.13 |
+| `uv`                | any recent release | runs the helper, the tests and Ruff            |
+| `make`              | any                | the gates are Makefile targets                 |
+| `markdownlint-cli2` | 0.20 or newer      | the Markdown gate                              |
+| Ruff                | 0.15.12            | pinned in the Makefile as `RUFF_VERSION`       |
 
 No Rust toolchain is needed to develop here. Dylint is built on the release
 runners, never locally.
@@ -19,12 +19,19 @@ Install `uv` and `markdownlint-cli2` by whatever means the system prefers, then:
 make all
 ```
 
-`uv` fetches pytest, PyYAML and Hypothesis on demand from the versions pinned
-in the Makefile's `PYTEST_DEPS`; `pyproject.toml` lists the same bounds under
-`dependency-groups.dev` for an editor that wants a resolved environment. Ruff
-is run through `uv tool run` at the pinned version, so a different Ruff on the
-PATH does not change the verdict. Either tool can be overridden for a one-off
-run with `make MDLINT=... markdownlint` or `make RUFF_VERSION=... ruff`.
+Every `uv` call goes through `scripts/uv_gate.py`, a vendored copy of the
+helper in
+[shared-actions](https://github.com/leynos/shared-actions/tree/main/uv_gate).
+It cleans the environment, uses the global uv cache, runs offline first, and
+goes online at most once, only when uv proves that a file is missing from the
+cache. Do not edit it: the concordat `uv-gate-baseline` rule compares its
+digest with the canonical file's. `make prepare` installs the locked `dev`
+dependency group (pytest, PyYAML and Hypothesis, with the bounds in
+`pyproject.toml`) and `make test` depends on it. Run `uv lock` yourself to
+change `uv.lock`; the gates never do. Ruff is run as a pinned tool at
+`RUFF_VERSION`, so a different Ruff on the PATH does not change the verdict.
+Either tool can be overridden for a one-off run with
+`make MDLINT=... markdownlint` or `make RUFF_VERSION=... ruff`.
 
 The Markdown gate is the one place where a green local run is not proof: CI
 runs a newer markdownlint than most hosts have, and the two disagree about
