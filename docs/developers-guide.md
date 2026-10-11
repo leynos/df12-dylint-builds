@@ -5,7 +5,7 @@
 | Tool                | Version            | Why                                            |
 | ------------------- | ------------------ | ---------------------------------------------- |
 | Python              | 3.12 or newer      | `scripts/` targets 3.12; the gates run on 3.13 |
-| `uv`                | any recent release | runs the helper, the tests and Ruff            |
+| `uv`                | any recent release | runs the helper, the tests, and Ruff            |
 | `make`              | any                | the gates are Makefile targets                 |
 | `markdownlint-cli2` | 0.20 or newer      | the Markdown gate                              |
 | Ruff                | 0.15.12            | pinned in the Makefile as `RUFF_VERSION`       |
