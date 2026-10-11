@@ -5,7 +5,7 @@
 | Tool                | Version            | Why                                            |
 | ------------------- | ------------------ | ---------------------------------------------- |
 | Python              | 3.12 or newer      | `scripts/` targets 3.12; the gates run on 3.13 |
-| `uv`                | any recent release | runs the helper, the tests, and Ruff            |
+| `uv`                | any recent release | runs the helper, the tests, and Ruff           |
 | `make`              | any                | the gates are Makefile targets                 |
 | `markdownlint-cli2` | 0.20 or newer      | the Markdown gate                              |
 | Ruff                | 0.15.12            | pinned in the Makefile as `RUFF_VERSION`       |
@@ -27,7 +27,7 @@ goes online at most once, only when uv proves that a file is missing from the
 cache. Do not edit it: the concordat `uv-gate-baseline` rule compares its
 digest with the canonical file's. `make prepare` installs the locked `dev`
 dependency group (pytest, PyYAML and Hypothesis, with the bounds in
-`pyproject.toml`) and `make test` depends on it. Run `uv lock` yourself to
+`pyproject.toml`) and `make test` depends on it. Run `uv lock` manually to
 change `uv.lock`; the gates never do. Ruff is run as a pinned tool at
 `RUFF_VERSION`, so a different Ruff on the PATH does not change the verdict.
 Either tool can be overridden for a one-off run with
