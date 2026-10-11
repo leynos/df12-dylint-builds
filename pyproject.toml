@@ -17,6 +17,9 @@ dev = [
 [tool.ruff]
 line-length = 88
 target-version = "py312"
+# Vendored byte for byte from shared-actions; its digest is audited, so Ruff
+# must neither lint nor reformat it.
+extend-exclude = ["scripts/uv_gate.py"]
 
 [tool.ruff.lint]
 select = ["F", "W", "E", "I", "B", "UP", "D", "N", "SIM", "PTH", "RUF"]

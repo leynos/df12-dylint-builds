@@ -1,9 +1,11 @@
-.PHONY: help all test lint ruff fmt check-fmt markdownlint matrix expected upstream
+.PHONY: help all prepare test lint ruff fmt check-fmt markdownlint matrix expected upstream
 
-UV ?= uv
-UV_ENV = UV_CACHE_DIR=.uv-cache UV_TOOL_DIR=.uv-tools
+# Every uv call goes through the vendored helper, which cleans the environment,
+# uses the global uv cache, runs offline first and goes online at most once. See
+# https://github.com/leynos/shared-actions/tree/main/uv_gate for the contract.
+UV_GATE ?= python3 scripts/uv_gate.py
+PYTHON_VERSION ?= 3.13
 RUFF_VERSION ?= 0.15.12
-PYTEST_DEPS = --with 'pytest>=8,<10' --with 'pyyaml>=6,<7' --with 'hypothesis>=6,<7'
 PY_SOURCES := scripts tests
 MDLINT ?= markdownlint-cli2
 # `make fmt` and `make check-fmt` call mdtablefix directly. `--git` selects the
@@ -17,25 +19,28 @@ MDTABLEFIX_RULES = --wrap --renumber --breaks --ellipsis --fences
 
 all: check-fmt lint test ## Run every commit gate
 
-test: ## Run the unit tests, property tests and workflow contracts
-	$(UV_ENV) $(UV) run --no-project --python 3.13 $(PYTEST_DEPS) python -m pytest -q
+prepare: ## Install the locked development environment, offline first
+	$(UV_GATE) prepare --python $(PYTHON_VERSION) --group dev
+
+test: prepare ## Run the unit tests, property tests and workflow contracts
+	$(UV_GATE) run --python $(PYTHON_VERSION) --group dev -- python -m pytest -q
 
 lint: markdownlint ruff ## Lint Python and Markdown sources
 
 ruff: ## Lint Python sources
-	$(UV_ENV) $(UV) tool run ruff@$(RUFF_VERSION) check $(PY_SOURCES)
+	$(UV_GATE) tool --from ruff@$(RUFF_VERSION) -- ruff check $(PY_SOURCES)
 
 markdownlint: ## Lint Markdown files
-	$(MDLINT) "**/*.md" "#.uv-cache" "#.uv-tools" "#.venv"
+	$(MDLINT) "**/*.md" "#.venv"
 
 fmt: ## Format Python sources
-	$(UV_ENV) $(UV) tool run ruff@$(RUFF_VERSION) format $(PY_SOURCES)
-	$(UV_ENV) $(UV) tool run ruff@$(RUFF_VERSION) check --fix $(PY_SOURCES)
+	$(UV_GATE) tool --from ruff@$(RUFF_VERSION) -- ruff format $(PY_SOURCES)
+	$(UV_GATE) tool --from ruff@$(RUFF_VERSION) -- ruff check --fix $(PY_SOURCES)
 	$(MDTABLEFIX) --in-place $(MDTABLEFIX_SELECT) $(MDTABLEFIX_RULES)
 	@unset FORCE_COLOR; $(MDLINT) --fix "**/*.md"
 
 check-fmt: ## Verify Python formatting
-	$(UV_ENV) $(UV) tool run ruff@$(RUFF_VERSION) format --check $(PY_SOURCES)
+	$(UV_GATE) tool --from ruff@$(RUFF_VERSION) -- ruff format --check $(PY_SOURCES)
 	$(MDTABLEFIX) --check $(MDTABLEFIX_SELECT) $(MDTABLEFIX_RULES)
 
 matrix: ## Print the release build matrix derived from dylint.toml
