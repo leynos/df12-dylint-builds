@@ -5,13 +5,18 @@
 byte-for-byte as ``scripts/uv_gate.py``. It implements the procedure in
 ``uv-robust-execution.md``:
 
-* ``prepare`` runs ``uv sync --locked --offline``. Only when uv proves that a
-  required file is missing from the cache, or that a managed Python download is
-  available but uv is offline, does it run **one** online ``uv sync --locked``.
+* ``prepare`` runs ``uv sync --locked --offline``. Only when uv proves one of
+  four recoverable misses does it run **one** online ``uv sync --locked``: a
+  required file missing from the cache (``cache-miss``), an offline resolution
+  that needs uncached data (``offline-resolution``), a managed Python download
+  that is available but blocked by the offline switch (``missing-python``), or a
+  Git source that is not cached (``missing-git-source``).
 * ``run`` runs ``uv run --frozen --offline <command>``. It never goes online
-  and never retries.
-* ``tool`` runs ``uv tool run --offline`` for a version-pinned tool. Like
-  ``prepare``, it goes online once, and only for the same two proven misses.
+  and never retries, whatever the failure.
+* ``tool`` runs ``uv tool run --offline`` for a pinned tool. Like ``prepare``,
+  it goes online once, and only for the same four proven misses. A tool spec is
+  pinned by ``name==VERSION``, ``name@VERSION``, ``git+URL@<full commit SHA>`` or
+  the direct reference ``name[extra] @ git+URL@<full commit SHA>``.
 
 Every invocation uses a cleaned environment (no inherited Git configuration,
 tokens or ``BASH_ENV``, no ``~/.lody`` on ``PATH``, no Git prompts, and
@@ -48,7 +53,7 @@ from pathlib import Path
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 REFUSAL_STATUS = 2
 ALLOW_ONLINE_VARIABLE = "UV_GATE_ALLOW_ONLINE"
 SYSTEM_GIT = Path("/usr/bin/git")
@@ -93,6 +98,10 @@ FORBIDDEN_SHORT = "UPn"
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 PINNED_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[^\]]+\])?")
 PINNED_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+!-]*")
+# PEP 508 direct reference to a Git URL: `name[extra] @ git+URL@ref`.
+DIRECT_REFERENCE = re.compile(
+    rf"(?P<name>{PINNED_NAME.pattern})\s*@\s*(?P<url>git\+\S+)"
+)
 
 
 class Kind(enum.Enum):
@@ -105,6 +114,7 @@ class Kind(enum.Enum):
     MISSING_PACKAGE = "missing-package"
     MISSING_REVISION = "missing-revision"
     MISSING_PYTHON = "missing-python"
+    MISSING_GIT_SOURCE = "missing-git-source"
     AUTH = "auth"
     UNKNOWN = "unknown"
 
@@ -144,12 +154,25 @@ SIGNATURES: tuple[tuple[Kind, re.Pattern[str]], ...] = (
     ),
     (
         # Both lines are required: the header alone also appears when no download
-        # exists, and only the hint proves that going online can fix it.
+        # exists, and only the hint proves that going online can fix it. Recorded
+        # from uv 0.13.0; another wording is `unknown`.
         Kind.MISSING_PYTHON,
         re.compile(
             r"No\s+interpreter\s+found\s+for\s+[^\n]+?\s+in\s+managed\s+installations"
             r"(?s:.*)A\s+managed\s+Python\s+download\s+is\s+available\s+for\s+"
             r"[^\n]+?,\s+but\s+uv\s+is\s+set\s+to\s+offline\s+mode"
+        ),
+    ),
+    (
+        # uv's own sentence for a Git source that is not in the cache, recorded
+        # from uv 0.13.0 (the version setup-uv installed on 2026-10-11). uv 0.9.21
+        # prints only "Git operation failed" without the reason, which stays
+        # `unknown`: that wording also covers a failed fetch, which a retry may
+        # not fix. A different wording in any other uv version is `unknown` too.
+        Kind.MISSING_GIT_SOURCE,
+        re.compile(
+            r"Remote\s+Git\s+fetches\s+are\s+not\s+allowed\s+because\s+network"
+            r"\s+connectivity\s+is\s+disabled"
         ),
     ),
     (
@@ -168,6 +191,7 @@ ONLINE_RECOVERABLE = frozenset(
         Kind.CACHE_MISS,
         Kind.OFFLINE_RESOLUTION,
         Kind.MISSING_PYTHON,
+        Kind.MISSING_GIT_SOURCE,
     }
 )
 
@@ -186,6 +210,7 @@ ADVICE = {
     Kind.MISSING_PYTHON: (
         "a managed Python interpreter is not installed and uv is offline"
     ),
+    Kind.MISSING_GIT_SOURCE: ("a Git source is not in the uv cache and uv is offline"),
     Kind.MISSING_PACKAGE: (
         "a package or version does not exist in the registry; not retried"
     ),
@@ -697,9 +722,10 @@ def tool_spec(tool_args: cabc.Sequence[str], command: cabc.Sequence[str]) -> str
 def is_pinned(spec: str) -> bool:
     """Report whether ``spec`` pins an exact version or a full commit.
 
-    Accepted: ``name==1.2.3``, ``name@1.2.3`` and ``git+URL@<40 hex digits>``.
-    Rejected: bare names, ranges, ``@latest`` and Git refs that are not a full
-    commit SHA.
+    Accepted: ``name==1.2.3``, ``name@1.2.3``, ``git+URL@<40 hex digits>`` and
+    the same Git URL as a direct reference, ``name[extra] @ git+URL@<40 hex
+    digits>``. Rejected: bare names, ranges, ``@latest`` and Git refs that are
+    not a full commit SHA, in either Git form.
 
     Examples
     --------
@@ -707,7 +733,15 @@ def is_pinned(spec: str) -> bool:
     (True, True, False)
     >>> is_pinned("cibuildwheel>=2.16"), is_pinned("tool@latest")
     (False, False)
+    >>> sha = "0123456789abcdef0123456789abcdef01234567"
+    >>> is_pinned(f"tool[extra] @ git+https://example.invalid/t.git@{sha}")
+    True
+    >>> is_pinned("tool[extra] @ git+https://example.invalid/t.git@main")
+    False
     """
+    direct = DIRECT_REFERENCE.fullmatch(spec)
+    if direct is not None:
+        return is_pinned(direct.group("url"))
     if spec.startswith("git+"):
         _, _, ref = spec.rpartition("@")
         return bool(FULL_SHA.fullmatch(ref.split("#", 1)[0]))
