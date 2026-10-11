@@ -6,12 +6,12 @@ byte-for-byte as ``scripts/uv_gate.py``. It implements the procedure in
 ``uv-robust-execution.md``:
 
 * ``prepare`` runs ``uv sync --locked --offline``. Only when uv proves that a
-  required file is missing from the cache does it run **one** online
-  ``uv sync --locked``.
+  required file is missing from the cache, or that a managed Python download is
+  available but uv is offline, does it run **one** online ``uv sync --locked``.
 * ``run`` runs ``uv run --frozen --offline <command>``. It never goes online
   and never retries.
 * ``tool`` runs ``uv tool run --offline`` for a version-pinned tool. Like
-  ``prepare``, it goes online once, and only for a proven cache miss.
+  ``prepare``, it goes online once, and only for the same two proven misses.
 
 Every invocation uses a cleaned environment (no inherited Git configuration,
 tokens or ``BASH_ENV``, no ``~/.lody`` on ``PATH``, no Git prompts, and
@@ -48,6 +48,7 @@ from pathlib import Path
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
 
+VERSION = "0.2.0"
 REFUSAL_STATUS = 2
 ALLOW_ONLINE_VARIABLE = "UV_GATE_ALLOW_ONLINE"
 SYSTEM_GIT = Path("/usr/bin/git")
@@ -103,6 +104,7 @@ class Kind(enum.Enum):
     MISSING_LOCK = "missing-lock"
     MISSING_PACKAGE = "missing-package"
     MISSING_REVISION = "missing-revision"
+    MISSING_PYTHON = "missing-python"
     AUTH = "auth"
     UNKNOWN = "unknown"
 
@@ -141,12 +143,32 @@ SIGNATURES: tuple[tuple[Kind, re.Pattern[str]], ...] = (
         re.compile(r"was\s+not\s+found\s+in\s+the\s+package\s+registry"),
     ),
     (
+        # Both lines are required: the header alone also appears when no download
+        # exists, and only the hint proves that going online can fix it.
+        Kind.MISSING_PYTHON,
+        re.compile(
+            r"No\s+interpreter\s+found\s+for\s+[^\n]+?\s+in\s+managed\s+installations"
+            r"(?s:.*)A\s+managed\s+Python\s+download\s+is\s+available\s+for\s+"
+            r"[^\n]+?,\s+but\s+uv\s+is\s+set\s+to\s+offline\s+mode"
+        ),
+    ),
+    (
         Kind.OFFLINE_RESOLUTION,
         re.compile(
             r"not\s+found\s+in\s+the\s+cache(?s:.*)network\s+was\s+disabled"
             r"|network\s+was\s+disabled(?s:.*)not\s+found\s+in\s+the\s+cache"
         ),
     ),
+)
+
+# The failure classes that earn the one online attempt in `prepare` and `tool`.
+# `run` never goes online, so none of them applies to it.
+ONLINE_RECOVERABLE = frozenset(
+    {
+        Kind.CACHE_MISS,
+        Kind.OFFLINE_RESOLUTION,
+        Kind.MISSING_PYTHON,
+    }
 )
 
 ADVICE = {
@@ -160,6 +182,9 @@ ADVICE = {
     ),
     Kind.MISSING_LOCK: (
         "uv.lock is missing. Create it with `uv lock`, commit it, and run again"
+    ),
+    Kind.MISSING_PYTHON: (
+        "a managed Python interpreter is not installed and uv is offline"
     ),
     Kind.MISSING_PACKAGE: (
         "a package or version does not exist in the registry; not retried"
@@ -573,7 +598,7 @@ def _refuse_forbidden(arguments: cabc.Sequence[str]) -> None:
 
 
 def prepare(ctx: Context, sync_args: cabc.Sequence[str]) -> int:
-    """Prepare dependencies offline, going online once for a proven cache miss.
+    """Prepare dependencies offline, going online once for a proven miss.
 
     Parameters
     ----------
@@ -593,7 +618,7 @@ def prepare(ctx: Context, sync_args: cabc.Sequence[str]) -> int:
     if status == 0:
         return 0
     kind = classify(text)
-    if kind not in {Kind.CACHE_MISS, Kind.OFFLINE_RESOLUTION}:
+    if kind not in ONLINE_RECOVERABLE:
         _report(kind, status, where="uv sync --locked --offline")
         return status
     if not _online_allowed(ctx.env):
@@ -723,7 +748,7 @@ def tool(
     if status == 0:
         return 0
     kind = classify(text)
-    if kind not in {Kind.CACHE_MISS, Kind.OFFLINE_RESOLUTION}:
+    if kind not in ONLINE_RECOVERABLE:
         _report(kind, status, where="uv tool run --offline")
         return status
     if not _online_allowed(ctx.env):
@@ -782,6 +807,9 @@ def main(
         uv's exit status, or 2 when the helper itself refuses.
     """
     args = list(sys.argv[1:] if argv is None else argv)
+    if args[:1] in (["-V"], ["--version"]):
+        sys.stdout.write(f"uv_gate {VERSION}\n")
+        return 0
     if not args or args[0] in {"-h", "--help"}:
         sys.stderr.write(USAGE)
         return REFUSAL_STATUS if not args else 0
