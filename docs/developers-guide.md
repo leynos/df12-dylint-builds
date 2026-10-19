@@ -116,19 +116,28 @@ The two `ci.yml` jobs select their runner by expression rather than by a label:
 
 ```yaml
 runs-on: >-
-  ${{ github.event.pull_request.head.repo.fork
+  ${{ (github.event.pull_request.head.repo.fork
+  || github.event.pull_request.user.login == 'dependabot[bot]')
   && 'ubuntu-latest' || 'ubicloud-standard-2' }}
 ```
 
 | Event                               | Runner                |
 | :---------------------------------- | :-------------------- |
 | A pull request from a fork          | `ubuntu-latest`       |
+| A pull request Dependabot opened    | `ubuntu-latest`       |
 | A pull request from this repository | `ubicloud-standard-2` |
 | A `workflow_dispatch`               | `ubicloud-standard-2` |
 
 A fork cannot obtain an Ubicloud runner, so a bare Ubicloud label leaves the
 job unschedulable and the pull request waiting on a check that never starts.
 This repository is public, so that is not a hypothetical.
+
+A pull request Dependabot opened also takes the hosted arm: hosted minutes cost
+nothing on a public repository, and Dependabot opens many pull requests. The
+expression tests the pull request's author, not `github.actor`, because the
+actor changes when someone re-runs a job or pushes to the branch, which would
+flip the runner. A Dependabot pull request therefore builds cold on the hosted
+pool.
 
 The last row is the one worth stating. A dispatch sets no `pull_request`
 context at all, so the field is absent rather than false; a missing property is

@@ -34,6 +34,15 @@ WORKFLOWS: Path = REPO_ROOT / ".github" / "workflows"
 #: expression loosely.
 FORK_FIELD: str = "github.event.pull_request.head.repo.fork"
 
+#: The pull request's author, not `github.actor`: the actor changes when
+#: someone re-runs a job or pushes to the branch, which would flip the
+#: runner. Dependabot's pull requests go to the hosted pool because
+#: hosted minutes cost nothing on a public repository.
+DEPENDABOT_FIELD: str = "github.event.pull_request.user.login == 'dependabot[bot]'"
+
+#: The exact condition under which a pull request takes the hosted arm.
+HOSTED_CONDITION: str = f"({FORK_FIELD} || {DEPENDABOT_FIELD})"
+
 #: The paid runner the CI lanes use when they can. Written here once, and
 #: asserted as this exact label: "not a GitHub-hosted label" would be
 #: satisfied by a misspelling, and a job pointed at a runner that does
@@ -41,7 +50,7 @@ FORK_FIELD: str = "github.event.pull_request.head.repo.fork"
 #: missing fork fallback this change exists to fix.
 CI_UBICLOUD_LABEL: str = "ubicloud-standard-2"
 
-#: The GitHub-hosted label a fork's pull request falls back to.
+#: The GitHub-hosted label a fork's or Dependabot's pull request falls back to.
 CI_FORK_LABEL: str = "ubuntu-latest"
 
 #: The short-circuit idiom GitHub Actions expressions use in place of a
@@ -72,24 +81,26 @@ HOSTED_RELEASE_JOBS: frozenset[str] = frozenset(
 DERIVED_RELEASE_JOBS: frozenset[str] = frozenset({"build", "verify-upstream"})
 
 
-def select_runner(declaration: str, *, fork: bool | None) -> str:
+def select_runner(
+    declaration: str, *, fork: bool | None, dependabot: bool = False
+) -> str:
     """Return the label GitHub selects, given the fork field's value.
 
     Evaluates the declaration rather than inspecting it. Reading the
     arms by position tells you which label sits where; it does not tell
     you which one an event actually gets, and the three events this
-    repository sees are a fork's pull request, its own pull request and
-    a dispatch. The last two do not set the field at all.
+    repository sees are a fork's pull request, its own pull request, a
+    Dependabot pull request and a dispatch. A dispatch sets neither field.
 
     A missing property is falsy in a GitHub Actions expression, so an
     absent field takes the same arm as an explicit false. That is why
     ``None`` is a value here rather than an error.
 
     Only the shape this repository uses is modelled: a condition that is
-    exactly the fork field. Anything else raises, because a contract
-    that needs to know which arm an event takes must be able to tell
-    that it cannot, rather than receive a label chosen by position in a
-    shape this function does not understand.
+    exactly the fork field or the Dependabot author test. Anything else
+    raises, because a contract that needs to know which arm an event takes
+    must be able to tell that it cannot, rather than receive a label chosen
+    by position in a shape this function does not understand.
 
     Parameters
     ----------
@@ -98,6 +109,8 @@ def select_runner(declaration: str, *, fork: bool | None) -> str:
     fork : bool or None
         The value of ``github.event.pull_request.head.repo.fork``, or
         None when the event does not set it.
+    dependabot : bool
+        Whether the pull request's author is ``dependabot[bot]``.
 
     Returns
     -------
@@ -112,10 +125,11 @@ def select_runner(declaration: str, *, fork: bool | None) -> str:
     match = RUNNER_TERNARY.match(declaration)
     assert match is not None, f"not a two-armed expression: {declaration!r}"
     condition = match.group("condition").strip()
-    assert condition == FORK_FIELD, (
-        f"this evaluator models only {FORK_FIELD}, not {condition!r}"
+    assert condition == HOSTED_CONDITION, (
+        f"this evaluator models only {HOSTED_CONDITION}, not {condition!r}"
     )
-    return match.group("when_true") if fork else match.group("when_false")
+    is_hosted = bool(fork) or dependabot
+    return match.group("when_true") if is_hosted else match.group("when_false")
 
 
 def permitted_hosted_labels(config: Config) -> frozenset[str]:
@@ -241,6 +255,10 @@ def test_every_ci_lane_falls_back_to_a_hosted_runner_for_a_fork(
             f"ci.yml:{job} must key its runner on {FORK_FIELD} so a fork's "
             f"pull request can run it: {match.group('condition')!r}"
         )
+        assert DEPENDABOT_FIELD in match.group("condition"), (
+            f"ci.yml:{job} must also key its runner on {DEPENDABOT_FIELD} so "
+            f"a Dependabot pull request runs hosted: {match.group('condition')!r}"
+        )
         assert match.group("when_true") in hosted, (
             f"ci.yml:{job} sends a fork's pull request to "
             f"{match.group('when_true')!r}, which is not a GitHub-hosted "
@@ -253,19 +271,34 @@ def test_every_ci_lane_falls_back_to_a_hosted_runner_for_a_fork(
 
 
 @pytest.mark.parametrize(
-    ("fork", "event", "expected"),
+    ("fork", "dependabot", "event", "expected"),
     [
-        pytest.param(True, "a fork's pull request", CI_FORK_LABEL, id="fork"),
+        pytest.param(True, False, "a fork's pull request", CI_FORK_LABEL, id="fork"),
         pytest.param(
-            False, "this repository's pull request", CI_UBICLOUD_LABEL, id="same-repo"
+            False,
+            False,
+            "this repository's pull request",
+            CI_UBICLOUD_LABEL,
+            id="same-repo",
         ),
         pytest.param(
-            None, "a push or a dispatch", CI_UBICLOUD_LABEL, id="field-absent"
+            False,
+            True,
+            "a Dependabot pull request",
+            CI_FORK_LABEL,
+            id="dependabot",
+        ),
+        pytest.param(
+            None, False, "a push or a dispatch", CI_UBICLOUD_LABEL, id="field-absent"
         ),
     ],
 )
 def test_every_ci_lane_lands_where_the_event_requires(
-    ci: dict[str, Any], fork: bool | None, event: str, expected: str
+    ci: dict[str, Any],
+    fork: bool | None,
+    dependabot: bool,
+    event: str,
+    expected: str,
 ) -> None:
     """Evaluating the declaration gives the right runner for each event.
 
@@ -277,7 +310,7 @@ def test_every_ci_lane_lands_where_the_event_requires(
     GitHub Actions expression, so those take the Ubicloud arm, and
     nothing in a positional reading of the arms establishes that.
 
-    Stated over every job, and over the three events this repository
+    Stated over every job, and over the four events this repository
     sees rather than the two the change was written for.
 
     Mutations: swapping the arms fails the fork case; negating the
@@ -285,7 +318,9 @@ def test_every_ci_lane_lands_where_the_event_requires(
     evaluator, which models only the fork field.
     """
     for job, spec in jobs_of(ci).items():
-        landed = select_runner(str(spec.get("runs-on", "")), fork=fork)
+        landed = select_runner(
+            str(spec.get("runs-on", "")), fork=fork, dependabot=dependabot
+        )
 
         assert landed == expected, (
             f"ci.yml:{job} sends {event} to {landed!r} rather than {expected!r}"
