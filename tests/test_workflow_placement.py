@@ -34,9 +34,10 @@ WORKFLOWS: Path = REPO_ROOT / ".github" / "workflows"
 #: expression loosely.
 FORK_FIELD: str = "github.event.pull_request.head.repo.fork"
 
-#: The pull request's author, not `github.actor`: the actor changes when
-#: someone re-runs a job or pushes to the branch, which would flip the
-#: runner. Dependabot's pull requests go to the hosted pool because
+#: The pull request's author, not `github.actor`: the actor is whoever
+#: triggered the run, so a person pushing to a Dependabot branch would flip
+#: the runner.
+#: Dependabot's pull requests go to the hosted pool because
 #: hosted minutes cost nothing on a public repository.
 DEPENDABOT_FIELD: str = "github.event.pull_request.user.login == 'dependabot[bot]'"
 

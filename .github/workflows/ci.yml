@@ -24,7 +24,8 @@ jobs:
     # newline inside the expression, which GitHub evaluates regardless,
     # so a green run is not evidence that it is absent.
     # Dependabot pull requests run on the hosted pool too (free on a public
-    # repository). The author is tested, not the actor, which changes on a re-run.
+    # repository). The author is tested, not the actor, which changes when
+    # someone else pushes to the branch.
     runs-on: >-
       ${{ (github.event.pull_request.head.repo.fork
       || github.event.pull_request.user.login == 'dependabot[bot]')

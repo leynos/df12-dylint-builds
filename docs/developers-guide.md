@@ -135,9 +135,9 @@ This repository is public, so that is not a hypothetical.
 A pull request Dependabot opened also takes the hosted arm: hosted minutes cost
 nothing on a public repository, and Dependabot opens many pull requests. The
 expression tests the pull request's author, not `github.actor`, because the
-actor changes when someone re-runs a job or pushes to the branch, which would
-flip the runner. A Dependabot pull request therefore builds cold on the hosted
-pool.
+actor is whoever triggered the run, so a person pushing to a Dependabot branch
+would flip the runner. A Dependabot pull request therefore builds cold on the
+hosted pool.
 
 The last row is the one worth stating. A dispatch sets no `pull_request`
 context at all, so the field is absent rather than false; a missing property is
