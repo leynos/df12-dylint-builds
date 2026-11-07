@@ -165,7 +165,7 @@ def _require_str(mapping: Mapping[str, Any], key: str, where: str) -> str:
 def _require_str_list(
     mapping: Mapping[str, Any], key: str, where: str
 ) -> tuple[str, ...]:
-    """Return the required non-empty array of distinct non-empty strings at ``key``."""
+    """Return the required non-empty array at ``key`` as a tuple of distinct strings."""
     value = _require(mapping, key, where)
     if not isinstance(value, list) or not value:
         raise ConfigError(f"{where}.{key} must be a non-empty array")

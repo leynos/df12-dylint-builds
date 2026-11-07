@@ -509,7 +509,7 @@ def verify(config: Config, archive: Path, *, run_smoke: bool = True) -> str:
 
 
 def _resolve_config(path: str | None) -> Config:
-    """Load the configuration at ``path``, or at the default location when ``None``."""
+    """Load the configuration at ``path``, or the default when it is unset or empty."""
     return load_config(path or default_config_path())
 
 
@@ -559,7 +559,10 @@ def verify_dist(
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
-    """Verify named archives or a whole ``--dist`` directory and print each digest."""
+    """Verify the named archives or a ``--dist`` directory and print each digest.
+
+    With ``--target``, a directory is checked against that target's assets only.
+    """
     config = _resolve_config(args.config)
     run_smoke = not args.no_smoke
     if args.archive:
