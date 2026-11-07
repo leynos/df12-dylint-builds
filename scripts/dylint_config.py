@@ -148,12 +148,14 @@ class Config:
 
 
 def _require(mapping: Mapping[str, Any], key: str, where: str) -> Any:
+    """Return ``mapping[key]``, or raise ``ConfigError`` naming the missing key."""
     if key not in mapping:
         raise ConfigError(f"{where}: missing required key {key!r}")
     return mapping[key]
 
 
 def _require_str(mapping: Mapping[str, Any], key: str, where: str) -> str:
+    """Return the required non-empty string at ``key``."""
     value = _require(mapping, key, where)
     if not isinstance(value, str) or not value:
         raise ConfigError(f"{where}.{key} must be a non-empty string")
@@ -163,6 +165,7 @@ def _require_str(mapping: Mapping[str, Any], key: str, where: str) -> str:
 def _require_str_list(
     mapping: Mapping[str, Any], key: str, where: str
 ) -> tuple[str, ...]:
+    """Return the required non-empty array of distinct non-empty strings at ``key``."""
     value = _require(mapping, key, where)
     if not isinstance(value, list) or not value:
         raise ConfigError(f"{where}.{key} must be a non-empty array")
@@ -174,6 +177,7 @@ def _require_str_list(
 
 
 def _parse_targets(raw: Mapping[str, Any]) -> tuple[Target, ...]:
+    """Validate the ``targets`` table and build one ``Target`` per triple."""
     if not isinstance(raw, dict) or not raw:
         raise ConfigError("targets must be a non-empty table")
     targets: list[Target] = []

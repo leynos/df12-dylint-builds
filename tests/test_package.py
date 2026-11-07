@@ -470,6 +470,7 @@ def test_a_binary_that_never_finishes_fails_the_smoke_test(
     """
 
     def _hang(*args: object, **kwargs: object) -> object:
+        """Stand in for ``subprocess.run`` by timing out at once."""
         raise subprocess.TimeoutExpired(cmd="cargo-dylint", timeout=SMOKE_TIMEOUT)
 
     monkeypatch.setattr(subprocess, "run", _hang)

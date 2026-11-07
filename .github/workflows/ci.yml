@@ -55,6 +55,8 @@ jobs:
         run: make check-fmt
       - name: Lint Python
         run: make ruff
+      - name: Check docstring coverage
+        run: make interrogate
       - name: Unit tests and workflow contracts
         run: make test
 

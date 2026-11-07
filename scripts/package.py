@@ -174,6 +174,7 @@ def parse_archive_name(config: Config, name: str) -> tuple[str, str, str]:
 
 
 def _tar_archive(archive: Path, stem: str, binary_path: Path) -> None:
+    """Write a reproducible ``.tar.gz`` holding ``stem/`` and the binary inside it."""
     with (
         archive.open("wb") as raw,
         gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz,
@@ -194,6 +195,7 @@ def _tar_archive(archive: Path, stem: str, binary_path: Path) -> None:
 
 
 def _zip_archive(archive: Path, stem: str, binary_path: Path) -> None:
+    """Write a reproducible ``.zip`` holding ``stem/`` and the binary inside it."""
     fixed = (1980, 1, 1, 0, 0, 0)
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         directory = zipfile.ZipInfo(f"{stem}/", date_time=fixed)
@@ -245,6 +247,7 @@ def extract(archive: Path, fmt: str, destination: Path) -> None:
     root = destination.resolve()
 
     def guard(name: str) -> Path:
+        """Resolve ``name``, refusing a path outside ``destination``."""
         resolved = (destination / name).resolve()
         if resolved != root and root not in resolved.parents:
             raise PackagingError(f"{archive.name}: member escapes the archive: {name}")
@@ -506,10 +509,12 @@ def verify(config: Config, archive: Path, *, run_smoke: bool = True) -> str:
 
 
 def _resolve_config(path: str | None) -> Config:
+    """Load the configuration at ``path``, or at the default location when ``None``."""
     return load_config(path or default_config_path())
 
 
 def _cmd_pack(args: argparse.Namespace) -> int:
+    """Pack one target's archives and print the name of each."""
     config = _resolve_config(args.config)
     for archive in pack(config, args.target, Path(args.source_dir), Path(args.out_dir)):
         print(f"packed {archive.name}")
@@ -554,6 +559,7 @@ def verify_dist(
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
+    """Verify named archives or a whole ``--dist`` directory and print each digest."""
     config = _resolve_config(args.config)
     run_smoke = not args.no_smoke
     if args.archive:
@@ -571,6 +577,7 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_expected(args: argparse.Namespace) -> int:
+    """Print each expected archive name followed by its checksum file name."""
     config = _resolve_config(args.config)
     names = (
         config.archive_names(args.target)
