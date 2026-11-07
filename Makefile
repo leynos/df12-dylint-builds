@@ -1,4 +1,4 @@
-.PHONY: help all prepare test lint ruff fmt check-fmt markdownlint matrix expected upstream
+.PHONY: help all prepare test lint ruff interrogate fmt check-fmt markdownlint matrix expected upstream
 
 # Every uv call goes through the vendored helper, which cleans the environment,
 # uses the global uv cache, runs offline first and goes online at most once. See
@@ -25,7 +25,30 @@ prepare: ## Install the locked development environment, offline first
 test: prepare ## Run the unit tests, property tests and workflow contracts
 	$(UV_GATE) run --python $(PYTHON_VERSION) --group dev -- python -m pytest -q
 
-lint: markdownlint ruff ## Lint Python and Markdown sources
+lint: markdownlint ruff interrogate ## Lint Python and Markdown sources
+
+# Interrogate scans each target recursively, subject to its default exclusions.
+INTERROGATE_VERSION ?= 1.7.0
+INTERROGATE_TARGETS ?= $(PY_SOURCES)
+# Level 2 prints a MISSED row per undocumented definition, which the
+# `interrogate` recipe below looks for: the rounded percentage alone can pass a
+# lone gap.
+INTERROGATE_FLAGS ?= -vv --fail-under 100
+INTERROGATE ?= $(UV_GATE) tool --python $(PYTHON_VERSION) --from 'interrogate==$(INTERROGATE_VERSION)' -- interrogate
+
+# Interrogate rounds its percentage to one decimal, so `--fail-under 100` alone
+# can pass a lone gap in a large repository. This recipe also fails when `grep`
+# finds a MISSED row in the report on standard output, which `-vv` or higher
+# prints for each undocumented definition.
+interrogate: ## Enforce complete Python docstring coverage
+	@report="$$($(INTERROGATE) $(INTERROGATE_FLAGS) $(INTERROGATE_TARGETS))"; \
+	  status=$$?; \
+	  printf '%s\n' "$$report"; \
+	  test "$$status" -eq 0 || exit "$$status"; \
+	  if printf '%s\n' "$$report" | grep -q '| *MISSED *|'; then \
+	    printf '%s\n' 'interrogate: undocumented definitions remain; see the MISSED rows above' >&2; \
+	    exit 1; \
+	  fi
 
 ruff: ## Lint Python sources
 	$(UV_GATE) tool --from ruff@$(RUFF_VERSION) -- ruff check $(PY_SOURCES)

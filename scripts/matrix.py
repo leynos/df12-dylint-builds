@@ -29,16 +29,19 @@ def check_tag(config: Config, tag: str) -> str:
 
 
 def _cmd_matrix(config: Config, _args: argparse.Namespace) -> int:
+    """Print the build matrix as compact JSON and return success."""
     print(json.dumps(config.matrix(), separators=(",", ":"), sort_keys=True))
     return 0
 
 
 def _cmd_check_tag(config: Config, args: argparse.Namespace) -> int:
+    """Print the release tag once ``check_tag`` accepts it, and return success."""
     print(check_tag(config, args.tag))
     return 0
 
 
 def _cmd_facts(config: Config, _args: argparse.Namespace) -> int:
+    """Print the configuration's release facts as ``key=value`` lines."""
     for key, value in (
         ("version", config.version),
         ("repository", config.repository),

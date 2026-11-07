@@ -74,10 +74,11 @@ traceback instead of a diagnosis.
 make all
 ```
 
-That runs, in order, `make check-fmt`, `make lint` (ruff and markdownlint-cli2)
-and `make test`. Run them sequentially, never in parallel, and read the whole
-output rather than the tail: a clean summary from one tool can sit above
-another tool's failure.
+That runs, in order, `make check-fmt`, `make lint` (ruff, markdownlint-cli2 and
+the `interrogate` docstring gate, which needs 100 per cent coverage of
+`scripts` and `tests`) and `make test`. Run them sequentially, never in
+parallel, and read the whole output rather than the tail: a clean summary from
+one tool can sit above another tool's failure.
 
 `make fmt` fixes formatting and the lint findings that are auto-fixable.
 
