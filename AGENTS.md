@@ -32,11 +32,11 @@ naming scheme and the consumer contract.
 ## Commit gates
 
 Run `make all` before committing. It executes `make check-fmt`, `make lint`
-(ruff and markdownlint) and `make test` (unit tests, property tests and the
-workflow contracts). Each contract matches the mechanism it protects, the
-`run:` command or the exact label, not a step name. Adding one means mutating
-the protected line once, confirming the test fails, and recording that mutation
-in the test's doc comment.
+(ruff, markdownlint and the `interrogate` docstring gate) and `make test` (unit
+tests, property tests and the workflow contracts). Each contract matches the
+mechanism it protects, the `run:` command or the exact label, not a step name.
+Adding one means mutating the protected line once, confirming the test fails,
+and recording that mutation in the test's doc comment.
 
 Commit messages use the imperative mood, a subject of about 50 characters, and
 a body wrapped at 72 columns explaining what changed and why. Do not add
