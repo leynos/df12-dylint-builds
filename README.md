@@ -46,7 +46,7 @@ A release is cut by pushing a tag of the form `v<dylint version>+build.<n>`,
 for example `v6.0.4+build.1`. The version names the upstream release being
 mirrored; the build number distinguishes reruns of this repository's own
 packaging of it. The reasoning is in
-[ADR 001](docs/adr-001-prebuilt-dylint-archives.md).
+[ADR 001](docs/adrs/adr-0001-prebuilt-dylint-archives.md).
 
 ## Development
 

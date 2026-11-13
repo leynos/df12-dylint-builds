@@ -2,7 +2,7 @@
 #
 # The release workflow derives its matrix from this file and the contract
 # tests read it, so no version, target, runner or archive name is written
-# down anywhere else. See docs/adr-001-prebuilt-dylint-archives.md.
+# down anywhere else. See docs/adrs/adr-0001-prebuilt-dylint-archives.md.
 
 schema_version = 1
 
